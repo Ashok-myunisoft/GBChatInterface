@@ -1,0 +1,54 @@
+{
+  
+    "LEAVE_TYPE_CRITERIA": {
+    
+	"SectionCriteriaList": [
+		{
+			"AttributesCriteriaList": [
+				{
+					"FieldName": "LeaveType",
+					"FieldValue": 5,
+					"InArray": null,
+					"JoinType": 2,
+					"OperationType": 7
+				},
+				{
+					"FieldName": "Name",
+					"FieldValue": "",
+					"InArray": null,
+					"JoinType": 0,
+					"OperationType": 2
+				}
+			],
+			"OperationType": 0,
+			"SectionId": 0
+		}
+	]
+},
+
+
+  "LEAVE_REASON_CRITERIA": {
+    "SectionCriteriaList": [
+      {
+        "SectionId": 0,
+        "AttributesCriteriaList": [
+          {
+            "FieldName": "ReasonType.Id",
+            "FieldValue": -1199998883,
+            "InArray": null,
+            "JoinType": 2,
+            "OperationType": 5
+          },
+          {
+            "FieldName": "Name",
+            "FieldValue": "",
+            "InArray": null,
+            "JoinType": 0,
+            "OperationType": 2
+          }
+        ],
+        "OperationType": 0
+      }
+    ]
+  }
+}
