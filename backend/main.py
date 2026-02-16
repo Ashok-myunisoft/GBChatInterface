@@ -27,7 +27,10 @@ from time_slip_bot.time_slip_agent import (
     call_time_slip_chat,
     normalize_time_slip_slots
 )
-from time_slip_bot.time_slip_client import apply_time_slip
+from time_slip_bot.time_slip_client import (
+    apply_time_slip,
+    get_time_slip_reasons
+)
 
 
 # ============================================================
@@ -362,18 +365,51 @@ async def chat(req: ChatRequest, Login: Optional[str] = Header(None)):
     # ========================================================
 
     if ts_state["intent"] == "apply":
-        has_time_pattern = bool(_extract_time(message))
+        # 1. Handle Selection from SelectList (Time Slip Reasons)
+        is_selection = False
         
-        if (ts_state["slots"].get("TimeSlipDate") and 
-            ts_state["slots"].get("FromTime") and 
-            ts_state["slots"].get("ToTime") and 
-            not ts_state["slots"].get("TimeSlipReason") and 
-            message and not has_time_pattern):
-            ts_state["slots"]["TimeSlipReason"] = message.strip()
-        else:
-            ai = call_time_slip_chat(message)
-            slots = normalize_time_slip_slots(ai["action"]["slots"])
-            ts_state["slots"].update({k: v for k, v in slots.items() if v})
+        if "last_options" in ts_state:
+            options = ts_state["last_options"]
+            selected = None
+            
+            # Check 1: User typed a Number (1, 2, 3...)
+            if message.isdigit():
+                idx = int(message) - 1
+                if 0 <= idx < len(options):
+                    selected = options[idx]
+
+            # Check 2: User typed the Label
+            if not selected:
+                selected = next((o for o in options if o["label"].lower() == message.lower()), None)
+
+            # APPLY SELECTION
+            if selected:
+                target_field = ts_state.get("awaiting_field")
+                if target_field == "TimeSlipReason":
+                    # We store the selected label as the reason name 
+                    # The client side will resolve ID based on Name or we pass ID if client supports it
+                    # But client currently resolves by matching Name again in apply_time_slip 
+                    # OR fallback to map_leave_reason. 
+                    # To be robust, we'll store the Label.
+                    ts_state["slots"]["TimeSlipReason"] = selected["label"]
+                
+                is_selection = True
+                ts_state.pop("last_options", None)
+                ts_state.pop("awaiting_field", None)
+
+        if not is_selection:
+            has_time_pattern = bool(_extract_time(message))
+            
+            if (ts_state["slots"].get("TimeSlipDate") and 
+                ts_state["slots"].get("FromTime") and 
+                ts_state["slots"].get("ToTime") and 
+                not ts_state["slots"].get("TimeSlipReason") and 
+                message and not has_time_pattern):
+                ts_state["slots"]["TimeSlipReason"] = message.strip()
+            else:
+                ai = call_time_slip_chat(message)
+                slots = normalize_time_slip_slots(ai["action"]["slots"])
+                ts_state["slots"].update({k: v for k, v in slots.items() if v})
 
         ts_state["slots"]["EmployeeId"] = login.get("UserId")
         ts_state["slots"]["EmployeeName"] = login.get("UserName")
@@ -389,9 +425,20 @@ async def chat(req: ChatRequest, Login: Optional[str] = Header(None)):
             return {"status": "success", "message": "Please provide To Time (HH:MM)."}
 
         if not ts_state["slots"].get("TimeSlipReason"):
+            reasons = get_time_slip_reasons(login)
+            if not reasons:
+                return {
+                    "status": "error",
+                    "message": "Unable to fetch time slip reasons."
+                }
+            options = [{"label": r.get("Name") or r.get("ReasonName"), "value": r.get("Id") or r.get("ReasonId")} for r in reasons]
+            ts_state["last_options"] = options
+            ts_state["awaiting_field"] = "TimeSlipReason"
+            options_text = "\n".join(f"{i+1}. {o['label']}" for i, o in enumerate(options))
+            
             return {
                 "status": "success",
-                "message": "Please provide the reason for the Time Slip."
+                "message": f"Please select the reason for the Time Slip from the options below:\n{options_text}\n\nReply with the number of your choice."
             }
 
         result = apply_time_slip_flow(ts_state["slots"], login)

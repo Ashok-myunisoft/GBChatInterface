@@ -72,7 +72,9 @@ def decode_response_body(body_base64: str) -> dict:
 
 def get_biz_transaction_type_id(transaction_class_id: int, login: dict) -> int:
     try:
-        url = f"{settings.GB_API_BASE}/ads/BizTransactionType.svc/SelectList"
+        # Use login object to get correct server URL
+        base_url = settings.get_direct_url(login)
+        url = f"{base_url}/ads/BizTransactionType.svc/SelectList"
 
         headers = {
             "Content-Type": "application/json",

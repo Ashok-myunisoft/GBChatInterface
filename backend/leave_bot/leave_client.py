@@ -68,27 +68,24 @@ except json.JSONDecodeError as e:
 # ============================================================
 # URL Helpers
 # ============================================================
-def direct_url(path: str) -> str:
+def direct_url(path: str, login: Dict[str, Any] = None) -> str:
     """
-    Build direct API URL.
-    config.get_direct_url() returns base: http://newserver:81/gb4
-    We append the service path here.
+    Build direct API URL using login object's BaseUri if available.
+    This ensures requests go to the correct server/database.
     """
-    base = settings.get_direct_url()
+    base = settings.get_direct_url(login)
     path = path.lstrip("/")
     url = f"{base}/{path}"
     logger.debug(f"Direct URL: {url}")
     return url
 
 
-def proxy_url(path: str) -> str:
+def proxy_url(path: str, login: Dict[str, Any] = None) -> str:
     """
-    Build proxy API URL.
-    config.get_proxy_url() returns:
-    http://183.xx.xx.xx/apps/proxy.php?url=http://newserver:81/gb4
-    We append the service path correctly.
+    Build proxy API URL using login object's FEUri and BaseUri if available.
+    This ensures requests go to the correct server/database.
     """
-    base = settings.get_proxy_url()
+    base = settings.get_proxy_url(login)
     path = path.lstrip("/")
     url = f"{base}/{path}"
     logger.debug(f"Proxy URL: {url}")
@@ -192,7 +189,7 @@ def get_leave_types(login: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Fetch leave types using criteria."""
     logger.info("📋 Fetching leave types from API...")
     try:
-        url = direct_url("/prs/Leave.svc/SelectList")
+        url = direct_url("/prs/Leave.svc/SelectList", login)
         
         if "SectionCriteriaList" in LEAVE_TYPE_CRITERIA:
             payload = LEAVE_TYPE_CRITERIA.copy()
@@ -225,7 +222,7 @@ def get_leave_reasons(login: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Fetch leave reasons from API."""
     logger.info("📋 Fetching leave reasons from API...")
     try:
-        url = direct_url("/ads/Reason.svc/SelectList")
+        url = direct_url("/ads/Reason.svc/SelectList", login)
         
         if "SectionCriteriaList" in LEAVE_REASON_CRITERIA:
             payload = LEAVE_REASON_CRITERIA.copy()
@@ -337,7 +334,7 @@ def apply_leave(slots: Dict[str, Any], login: Dict[str, Any]) -> Dict[str, Any]:
         logger.info(f"🚀 Submitting Leave Payload: {json.dumps(payload, indent=2)}")
         
         # Use HMS endpoint (Correction from previous issue)
-        url = proxy_url("/prs/TLeave.svc")
+        url = proxy_url("/prs/TLeave.svc", login)
         
         headers = {
             "Content-Type": "application/json",
@@ -381,3 +378,4 @@ def apply_leave(slots: Dict[str, Any], login: Dict[str, Any]) -> Dict[str, Any]:
 
 if __name__ == "__main__":
     print("Leave Client Module Loaded")
+
