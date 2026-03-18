@@ -123,3 +123,4 @@ def get_biz_transaction_type_id(transaction_class_id: int, login: dict) -> int:
 
     except Exception as e:
         raise Exception(f"Failed to get BizTransactionTypeId: {str(e)}")
+

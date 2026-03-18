@@ -7,9 +7,9 @@ from config import settings
 try:
     from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
     from langchain_openai import ChatOpenAI
-except:
+except Exception:
     from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
-    from langchain_community.chat_models import ChatOpenai
+    from langchain_community.chat_models import ChatOpenAI
 
 
 # ============================================================

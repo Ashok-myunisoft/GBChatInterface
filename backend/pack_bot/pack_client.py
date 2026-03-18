@@ -87,6 +87,13 @@ def get_gb_timestamp():
     ts = int(datetime.now().timestamp() * 1000)
     return f"/Date({ts})/"
 
+
+def _proxy_url(path: str, login=None) -> str:
+    """Build proxy API URL dynamically from login's FEUri/BaseUri."""
+    base = settings.get_proxy_url(login)
+    path = path.lstrip("/")
+    return f"{base}/{path}"
+
 # ============================================================
 # SELECT/SEARCH PACKS
 # ============================================================
@@ -190,10 +197,10 @@ def save_pack(pack: Dict[str,Any], login=None):
         "PackVersion": 1
     }
 
-    url = "http://183.82.250.223:92/apps/proxy.php?url=http://newserver:81/gb4/mms/Pack.svc/"
+    url = _proxy_url("mms/Pack.svc/", login)
 
     headers = {
-        "Login": json.dumps(login),                    
+        "Login": json.dumps(login),
         "Content-Type": "application/json",
         "X-Requested-With": "XMLHttpRequest",
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0)",
@@ -223,10 +230,7 @@ def delete_pack(pack_id: int, login_dto=None):
     login = login_dto or settings.GB_LOGIN_DTO
 
     # Correct URL → DELETE with PackId in query string
-    url = (
-        "http://183.82.250.223:92/apps/proxy.php?"
-        f"url=http://newserver:81/gb4/mms/Pack.svc/?PackId={pack_id}"
-    )
+    url = _proxy_url(f"mms/Pack.svc/?PackId={pack_id}", login)
 
     # CORRECT headers (NO base64, plain JSON!)
     headers = {

@@ -1,6 +1,8 @@
 import re
 import json
 import base64
+import time
+import difflib
 from datetime import datetime
 from typing import Optional
 
@@ -17,9 +19,10 @@ from pack_bot.pack_client import save_pack, get_gb_timestamp
 # ---------------- LEAVE ----------------
 from leave_bot.leave_agent import call_leave_chat, normalize_leave_slots
 from leave_bot.leave_client import (
-    apply_leave, 
-    get_leave_types_with_fallback as get_leave_types, 
-    get_leave_reasons
+    apply_leave,
+    get_leave_types_with_fallback as get_leave_types,
+    get_leave_reasons,
+    get_leave_balance
 )
 
 # ---------------- TIME SLIP ----------------
@@ -72,6 +75,28 @@ PACK_STATE = {}
 LEAVE_STATE = {}
 TIME_SLIP_STATE = {}
 
+# Last-active timestamp per user (for TTL-based expiry)
+_STATE_TS: dict = {}
+STATE_TTL = 1800  # seconds — abandon after 30 min of inactivity
+
+# Day-type options shown to the user during leave flow
+LEAVE_DAY_TYPE_OPTIONS = [
+    {"label": "Full Day",    "value": "FullDay",    "code": "0"},
+    {"label": "First Half",  "value": "FirstHalf",  "code": "1"},
+    {"label": "Second Half", "value": "SecondHalf", "code": "2"},
+]
+
+
+def _cleanup_expired():
+    """Remove state for users who have been inactive longer than STATE_TTL."""
+    now = time.time()
+    expired = [uid for uid, ts in _STATE_TS.items() if now - ts > STATE_TTL]
+    for uid in expired:
+        PACK_STATE.pop(uid, None)
+        LEAVE_STATE.pop(uid, None)
+        TIME_SLIP_STATE.pop(uid, None)
+        _STATE_TS.pop(uid, None)
+
 
 # ============================================================
 # HELPERS
@@ -106,20 +131,113 @@ def _extract_time(text: str):
     return m.group(0) if m else None
 
 
+_BALANCE_KEYWORDS = ["balance", "available", "remaining", "left", "how many"]
+
+# Maps keywords/aliases a user might say → canonical leave type name fragment
+# Used for partial matching against the API's leave type name field
+_LEAVE_TYPE_ALIASES: dict = {
+    "casual": "Casual Leave",
+    "cl": "Casual Leave",
+    "sick": "Sick Leave",
+    "sl": "Sick Leave",
+    "lop": "Loss of Pay",
+    "loss of pay": "Loss of Pay",
+    "earned": "Earned Leave",
+    "el": "Earned Leave",
+    "maternity": "Maternity Leave",
+    "ml": "Maternity Leave",
+    "comp off": "Comp Off Leave",
+    "compoff": "Comp Off Leave",
+    "coff": "Comp Off Leave",
+    "absent": "Absent",
+}
+
+
+def _is_balance_query(message: str) -> bool:
+    """Return True if the message is asking about leave balance/availability."""
+    msg = message.lower()
+    words = re.findall(r'\b\w+\b', msg)
+    has_leave = "leave" in msg or _fuzzy_in(words, "leave")
+    if not has_leave:
+        return False
+    return (
+        any(k in msg for k in _BALANCE_KEYWORDS) or
+        any(_fuzzy_in(words, k) for k in _BALANCE_KEYWORDS)
+    )
+
+
+def _extract_leave_type_filter(message: str):
+    """
+    If the user named a specific leave type (e.g. 'sick leave balance'),
+    return the canonical name fragment to filter on (e.g. 'Sick Leave').
+    Returns None if no specific type was mentioned.
+    """
+    msg = message.lower()
+    # Check multi-word aliases first (e.g. "loss of pay", "comp off")
+    for alias, canonical in _LEAVE_TYPE_ALIASES.items():
+        if alias in msg:
+            return canonical
+    # Fuzzy single-word check
+    words = re.findall(r'\b\w+\b', msg)
+    for alias, canonical in _LEAVE_TYPE_ALIASES.items():
+        if " " not in alias and _fuzzy_in(words, alias, cutoff=0.85):
+            return canonical
+    return None
+
+
+def _format_balance_response(balances: list, filter_type: Optional[str] = None) -> str:
+    """
+    Format the leave balance API result into a readable message.
+    If filter_type is given, show only the matching leave type.
+    """
+    if not balances:
+        return "No leave balance information found."
+
+    def _name(b):
+        return (b.get("LeaveName") or b.get("LeaveTypeName") or b.get("TLeaveTypeName") or
+                b.get("Name") or "")
+
+    def _available(b):
+        return (b.get("LeaveBalance") if b.get("LeaveBalance") is not None else
+                b.get("AvailableLeave") if b.get("AvailableLeave") is not None else
+                b.get("TAvailableLeave") if b.get("TAvailableLeave") is not None else
+                b.get("Available") if b.get("Available") is not None else
+                b.get("Balance") if b.get("Balance") is not None else 0)
+
+    if filter_type:
+        filtered = [b for b in balances if filter_type.lower() in _name(b).lower()]
+        if filtered:
+            b = filtered[0]
+            return f"{_name(b)}: {_available(b)} days available."
+        return f"No balance information found for '{filter_type}'."
+
+    lines = ["Your leave balances are:\n"]
+    for b in balances:
+        lines.append(f"{_name(b)}: {_available(b)} days")
+    return "\n".join(lines)
+
+
 # ============================================================
 # INTENT RESOLUTION
 # ============================================================
 
+def _fuzzy_in(words: list, keyword: str, cutoff: float = 0.82) -> bool:
+    """Return True if any word in `words` closely matches `keyword`."""
+    return bool(difflib.get_close_matches(keyword, words, n=1, cutoff=cutoff))
+
+
 def resolve_intent(message: str) -> str:
     msg = message.lower()
+    words = re.findall(r'\b\w+\b', msg)  # tokenize for fuzzy matching
 
     leave_score = 0
     ts_score = 0
 
     # -------- LEAVE SIGNALS --------
-    if "leave" in msg:
+    if "leave" in msg or _fuzzy_in(words, "leave"):
         leave_score += 3
-    if any(k in msg for k in ["sick", "casual", "lop"]):
+    if any(k in msg for k in ["sick", "casual", "lop"]) or \
+            any(_fuzzy_in(words, k) for k in ["sick", "casual", "lop"]):
         leave_score += 2
     if re.search(r"\b\d+\s*(day|days)\b", msg):
         leave_score += 2
@@ -127,7 +245,8 @@ def resolve_intent(message: str) -> str:
         leave_score += 2
 
     # -------- TIME SLIP SIGNALS --------
-    if "permission" in msg or "time slip" in msg:
+    if "permission" in msg or "time slip" in msg or \
+            _fuzzy_in(words, "permission") or _fuzzy_in(words, "timeslip"):
         ts_score += 3
     if _extract_time(msg):
         ts_score += 3
@@ -226,6 +345,10 @@ async def chat(req: ChatRequest, Login: Optional[str] = Header(None)):
     user_id = str(login.get("UserId", "default"))
     message = req.message.strip()
 
+    # Clean up abandoned sessions, then refresh this user's timestamp
+    _cleanup_expired()
+    _STATE_TS[user_id] = time.time()
+
     # Initialize States with 'awaiting' field for Pack
     PACK_STATE.setdefault(user_id, {"intent": None, "slots": {}, "awaiting": None})
     LEAVE_STATE.setdefault(user_id, {"intent": None, "slots": {}})
@@ -234,6 +357,24 @@ async def chat(req: ChatRequest, Login: Optional[str] = Header(None)):
     pack_state = PACK_STATE[user_id]
     leave_state = LEAVE_STATE[user_id]
     ts_state = TIME_SLIP_STATE[user_id]
+
+    # ========================================================
+    # LEAVE BALANCE QUERY — handled immediately, no state change
+    # ========================================================
+
+    if _is_balance_query(message):
+        try:
+            balances = get_leave_balance(login)
+            leave_filter = _extract_leave_type_filter(message)
+            return {
+                "status": "success",
+                "message": _format_balance_response(balances, filter_type=leave_filter)
+            }
+        except Exception:
+            return {
+                "status": "error",
+                "message": "Unable to fetch leave balance at the moment. Please try again later."
+            }
 
     # ========================================================
     # CONTINUE ACTIVE LEAVE FLOW
@@ -247,15 +388,22 @@ async def chat(req: ChatRequest, Login: Optional[str] = Header(None)):
             options = leave_state["last_options"]
             selected = None
             
-            # Check 1: User typed a Number (1, 2, 3...)
+            # Check 1: User typed a Number
+            # TLeaveDayType uses 0-based (0/1/2); all other fields use 1-based (1/2/3...)
             if message.isdigit():
-                idx = int(message) - 1
+                if leave_state.get("awaiting_field") == "TLeaveDayType":
+                    idx = int(message)        # 0-indexed
+                else:
+                    idx = int(message) - 1    # 1-indexed
                 if 0 <= idx < len(options):
                     selected = options[idx]
 
-            # Check 2: User typed the Label (e.g. "Sick Leave")
+            # Check 2: User typed the Label (e.g. "Sick Leave") — fuzzy match
             if not selected:
-                selected = next((o for o in options if o["label"].lower() == message.lower()), None)
+                labels = [o["label"].lower() for o in options]
+                close = difflib.get_close_matches(message.lower(), labels, n=1, cutoff=0.7)
+                if close:
+                    selected = next((o for o in options if o["label"].lower() == close[0]), None)
 
             # APPLY SELECTION
             if selected:
@@ -267,6 +415,9 @@ async def chat(req: ChatRequest, Login: Optional[str] = Header(None)):
                 elif target_field == "Reason":
                     leave_state["slots"]["ReasonId"] = str(selected["value"])
                     leave_state["slots"]["Reason"] = selected["label"]
+                elif target_field == "TLeaveDayType":
+                    leave_state["slots"]["TLeaveDayType"] = selected["value"]
+                    leave_state["slots"]["TLeaveDayTypeCode"] = selected.get("code", "0")
                 
                 is_selection = True
                 leave_state.pop("last_options", None)
@@ -338,6 +489,16 @@ async def chat(req: ChatRequest, Login: Optional[str] = Header(None)):
                 "message": f"Please select the reason for your leave from the options below:\n{options_text}\n\nReply with the number of your choice."
             }
 
+        if not leave_state["slots"].get("TLeaveDayType"):
+            options = [{"label": o["label"], "value": o["value"], "code": o["code"]} for o in LEAVE_DAY_TYPE_OPTIONS]
+            leave_state["last_options"] = options
+            leave_state["awaiting_field"] = "TLeaveDayType"
+            options_text = "\n".join(f"{i}. {o['label']}" for i, o in enumerate(options))
+            return {
+                "status": "success",
+                "message": f"Please select the Day Type:\n{options_text}\n\nReply with the number of your choice."
+            }
+
         # ---------------- CALCULATE DAYS ----------------
         days = _calculate_days(
             leave_state["slots"]["FromDate"],
@@ -378,9 +539,12 @@ async def chat(req: ChatRequest, Login: Optional[str] = Header(None)):
                 if 0 <= idx < len(options):
                     selected = options[idx]
 
-            # Check 2: User typed the Label
+            # Check 2: User typed the Label — fuzzy match
             if not selected:
-                selected = next((o for o in options if o["label"].lower() == message.lower()), None)
+                labels = [o["label"].lower() for o in options]
+                close = difflib.get_close_matches(message.lower(), labels, n=1, cutoff=0.7)
+                if close:
+                    selected = next((o for o in options if o["label"].lower() == close[0]), None)
 
             # APPLY SELECTION
             if selected:
@@ -398,30 +562,57 @@ async def chat(req: ChatRequest, Login: Optional[str] = Header(None)):
                 ts_state.pop("awaiting_field", None)
 
         if not is_selection:
-            has_time_pattern = bool(_extract_time(message))
-            
-            if (ts_state["slots"].get("TimeSlipDate") and 
-                ts_state["slots"].get("FromTime") and 
-                ts_state["slots"].get("ToTime") and 
-                not ts_state["slots"].get("TimeSlipReason") and 
-                message and not has_time_pattern):
-                ts_state["slots"]["TimeSlipReason"] = message.strip()
+            awaiting = ts_state.get("awaiting_field")
+
+            if awaiting == "TimeSlipDate":
+                # User is directly answering the date question — parse and store it
+                from utils.date_parser import parse_date
+                parsed = parse_date(message.strip())
+                if parsed:
+                    ts_state["slots"]["TimeSlipDate"] = parsed
+                    ts_state.pop("awaiting_field", None)
+                # If parse failed, leave awaiting_field set so we ask again below
+
+            elif awaiting == "FromTime":
+                extracted = _extract_time(message)
+                if extracted:
+                    ts_state["slots"]["FromTime"] = extracted
+                    ts_state.pop("awaiting_field", None)
+
+            elif awaiting == "ToTime":
+                extracted = _extract_time(message)
+                if extracted:
+                    ts_state["slots"]["ToTime"] = extracted
+                    ts_state.pop("awaiting_field", None)
+
             else:
-                ai = call_time_slip_chat(message)
-                slots = normalize_time_slip_slots(ai["action"]["slots"])
-                ts_state["slots"].update({k: v for k, v in slots.items() if v})
+                # No specific field awaited — try LLM extraction for multi-slot messages
+                has_time_pattern = bool(_extract_time(message))
+                if (ts_state["slots"].get("TimeSlipDate") and
+                    ts_state["slots"].get("FromTime") and
+                    ts_state["slots"].get("ToTime") and
+                    not ts_state["slots"].get("TimeSlipReason") and
+                    message and not has_time_pattern):
+                    ts_state["slots"]["TimeSlipReason"] = message.strip()
+                else:
+                    ai = call_time_slip_chat(message)
+                    slots = normalize_time_slip_slots(ai["action"]["slots"])
+                    ts_state["slots"].update({k: v for k, v in slots.items() if v})
 
         ts_state["slots"]["EmployeeId"] = login.get("UserId")
         ts_state["slots"]["EmployeeName"] = login.get("UserName")
         ts_state["slots"]["EmployeeCode"] = login.get("UserCode")
 
         if not ts_state["slots"].get("TimeSlipDate"):
+            ts_state["awaiting_field"] = "TimeSlipDate"
             return {"status": "success", "message": "Please provide Time Slip Date."}
 
         if not ts_state["slots"].get("FromTime"):
+            ts_state["awaiting_field"] = "FromTime"
             return {"status": "success", "message": "Please provide From Time (HH:MM)."}
 
         if not ts_state["slots"].get("ToTime"):
+            ts_state["awaiting_field"] = "ToTime"
             return {"status": "success", "message": "Please provide To Time (HH:MM)."}
 
         if not ts_state["slots"].get("TimeSlipReason"):
@@ -496,6 +687,18 @@ async def chat(req: ChatRequest, Login: Optional[str] = Header(None)):
     if intent == "leave":
         leave_state["intent"] = "apply"
         
+        # ---------------- EXTRACT SLOTS FROM INITIAL MESSAGE ----------------
+        # User said "Apply leave tomorrow", so we should extract "tomorrow"
+        # and not ask for it again.
+        ai = call_leave_chat(message)
+        slots = normalize_leave_slots(ai["action"]["slots"])
+        
+        # Only update slots that have values (don't overwrite with empty)
+        # But since state is new, we can just update.
+        for k, v in slots.items():
+            if v:
+                leave_state["slots"][k] = v
+
         # Fetch types immediately
         types = get_leave_types(login)
         if not types:
@@ -510,6 +713,13 @@ async def chat(req: ChatRequest, Login: Optional[str] = Header(None)):
         leave_state["awaiting_field"] = "LeaveType"
         
         options_text = "\n".join(f"{i+1}. {o['label']}" for i, o in enumerate(options))
+        
+        # If we already have dates, we might want to acknowledge them?
+        # But the prompt is just "Select Leave Type".
+        # The flow loop will pick up the filled slots logic next turn.
+        # Check if we need to prompt for leave type? 
+        # The prompt is standard.
+        
         return {
             "status": "success",
             "message": f"Sure 👍 Please select Leave Type from the options below:\n{options_text}\n\nReply with the number of your choice."
@@ -517,7 +727,62 @@ async def chat(req: ChatRequest, Login: Optional[str] = Header(None)):
 
     if intent == "time_slip":
         ts_state["intent"] = "apply"
-        return {"status": "success", "message": "Sure 👍 Please provide Time Slip Date."}
+        
+        # ---------------- EXTRACT SLOTS FROM INITIAL MESSAGE ----------------
+        ai = call_time_slip_chat(message)
+        slots = normalize_time_slip_slots(ai["action"]["slots"])
+        
+        for k, v in slots.items():
+            if v:
+                ts_state["slots"][k] = v
+        
+        # If date is already captured, we shouldn't ask "Please provide Time Slip Date."
+        # The loop logic handles this, but here we are returning a specific first response.
+        # We need to check if date is missing.
+        
+        if not ts_state["slots"].get("TimeSlipDate"):
+            ts_state["awaiting_field"] = "TimeSlipDate"
+            return {"status": "success", "message": "Sure 👍 Please provide Time Slip Date."}
+        
+        # If date IS present, we let the loop handle the next missing field (FromTime, etc.)
+        # We can return a generic "Processing..." that client ignores? 
+        # Or better: We call the LOOP logic recursively or fall through?
+        # Since this is an API endpoint returning a response, we must calculate the Next Step.
+        
+        # Re-evaluating the flow:
+        # If I return here, I must return the Correct Next Question.
+        # I can copy-paste the logic or refactor. 
+        # Simplest: copy logic for determining next question.
+        
+        if not ts_state["slots"].get("FromTime"):
+            return {"status": "success", "message": "Please provide From Time (HH:MM)."}
+            
+        if not ts_state["slots"].get("ToTime"):
+            return {"status": "success", "message": "Please provide To Time (HH:MM)."}
+            
+        if not ts_state["slots"].get("TimeSlipReason"):
+            reasons = get_time_slip_reasons(login)
+            if not reasons:
+                return {
+                     "status": "error",
+                     "message": "Unable to fetch time slip reasons."
+                }
+            options = [{"label": r.get("Name") or r.get("ReasonName"), "value": r.get("Id") or r.get("ReasonId")} for r in reasons]
+            ts_state["last_options"] = options
+            ts_state["awaiting_field"] = "TimeSlipReason"
+            options_text = "\n".join(f"{i+1}. {o['label']}" for i, o in enumerate(options))
+            
+            return {
+                "status": "success",
+                "message": f"Please select the reason for the Time Slip from the options below:\n{options_text}\n\nReply with the number of your choice."
+            }
+            
+        # If everything is full (rare for initial message?), we could apply immediately?
+        # "Time slip for today 10 to 11 personal"
+        result = apply_time_slip_flow(ts_state["slots"], login)
+        if result.get("status") == "success":
+            TIME_SLIP_STATE.pop(user_id, None)
+        return result
 
 
     # ========================================================

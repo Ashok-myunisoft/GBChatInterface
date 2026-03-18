@@ -69,5 +69,21 @@ class Settings(BaseSettings):
         """
         return self.get_direct_url()
 
+    @property
+    def GB_LOGIN_DTO(self) -> Dict[str, Any]:
+        """
+        Default fallback login used when no Login header is provided.
+        In production a real Login header should always be sent by the UI.
+        """
+        return {
+            "UserId": 0,
+            "UserName": "System",
+            "UserCode": "SYSTEM",
+            "WorkOUId": 0,
+            "WorkPeriodId": 0,
+            "BaseUri": self.DEFAULT_BASE_URI,
+            "FEUri": self.DEFAULT_FE_URI,
+        }
+
 
 settings = Settings()

@@ -53,16 +53,19 @@ try:
     logger.info("✓ Criteria loaded successfully from criteria.json")
     
 except FileNotFoundError:
-    logger.error("❌ criteria.json file not found!")
-    raise Exception("Please create criteria.json with LEAVE_TYPE_CRITERIA and LEAVE_REASON_CRITERIA")
+    logger.error("❌ criteria.json file not found! Leave functionality will be limited.")
+    LEAVE_TYPE_CRITERIA = {}
+    LEAVE_REASON_CRITERIA = {}
 
 except KeyError as e:
-    logger.error(f"❌ Missing key in criteria.json: {e}")
-    raise Exception(f"Please add {e} to criteria.json")
+    logger.error(f"❌ Missing key in criteria.json: {e}. Leave functionality will be limited.")
+    LEAVE_TYPE_CRITERIA = {}
+    LEAVE_REASON_CRITERIA = {}
 
 except json.JSONDecodeError as e:
-    logger.error(f"❌ Invalid JSON in criteria.json: {e}")
-    raise Exception("Please fix the JSON syntax in criteria.json")
+    logger.error(f"❌ Invalid JSON in criteria.json: {e}. Leave functionality will be limited.")
+    LEAVE_TYPE_CRITERIA = {}
+    LEAVE_REASON_CRITERIA = {}
 
 
 # ============================================================
@@ -258,7 +261,7 @@ def _parse_date(val: str) -> Optional[datetime]:
     return None
 
 def _gb_date(dt: datetime) -> str:
-    timestamp_ms = calendar.timegm(dt.timetuple()) * 1000
+    timestamp_ms = int(dt.timestamp() * 1000)
     return f"/Date({timestamp_ms})/"
 
 
@@ -288,7 +291,15 @@ def apply_leave(slots: Dict[str, Any], login: Dict[str, Any]) -> Dict[str, Any]:
         # Use the name provided in slots, or default to empty string if missing
         leave_type_name = slots.get("LeaveType", "")
         
-        reason_id, reason_name = map_leave_reason(slots.get("Reason"))
+        # Use the ReasonId/Reason already set by the selection flow.
+        # Fall back to the static map only if the slot is missing.
+        reason_id = slots.get("ReasonId") or None
+        reason_name = slots.get("Reason") or ""
+        if not reason_id:
+            mapped_id, mapped_name = map_leave_reason(slots.get("Reason"))
+            reason_id = mapped_id
+            if mapped_name:
+                reason_name = mapped_name
         
         biz_type_id = get_biz_transaction_type_id(LEAVE_TRANSACTION_CLASS_ID, login)
         
@@ -304,16 +315,16 @@ def apply_leave(slots: Dict[str, Any], login: Dict[str, Any]) -> Dict[str, Any]:
             "PeriodId": login["WorkPeriodId"],
             "ReasonId": reason_id,
             "TAvailabeLeave": 0,
-            "TLeaveDayType": "FullDay",
+            "TLeaveDayType": slots.get("TLeaveDayType", "FullDay"),
             "TLeaveDetailArray": [
                 {
-                    "DayType": "0",
+                    "DayType": slots.get("TLeaveDayTypeCode", "0"),
                     "EmployeeId": emp_id,
                     "EmployeeName": emp_name,
                     "LeaveDayName": day_name,
                     "LeaveTypeId": leave_type_id,
                     "TLeaveDetailLeaveDate": _gb_date(from_dt),
-                    "TLeaveDetailLeaveDayType": "0",
+                    "TLeaveDetailLeaveDayType": slots.get("TLeaveDayTypeCode", "0"),
                     "TLeaveDetailNumberOfDays": str(days),
                     "TLeaveDetailSlNo": 1,
                     "TLeaveDetailValidTill": _gb_date(to_dt)
@@ -375,6 +386,54 @@ def apply_leave(slots: Dict[str, Any], login: Dict[str, Any]) -> Dict[str, Any]:
     except Exception as e:
         logger.error(f"❌ Leave application failed: {e}")
         raise
+
+# ============================================================
+# Get Leave Balance (LeaveStatusReport)
+# ============================================================
+def get_leave_balance(login: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Fetch leave balance for the logged-in employee using LeaveStatusReport API."""
+    logger.info("📋 Fetching leave balance...")
+    try:
+        with open("criteria.json", "r", encoding="utf-8") as f:
+            criteria_data = json.load(f)
+
+        payload = criteria_data.get("LEAVE_BALANCE_CRITERIA")
+        if not payload:
+            logger.error("❌ LEAVE_BALANCE_CRITERIA not found in criteria.json")
+            return []
+
+        import copy
+        payload = copy.deepcopy(payload)
+
+        # Replace dynamic fields from login_dto
+        for section in payload.get("SectionCriteriaList", []):
+            for attr in section.get("AttributesCriteriaList", []):
+                field_name = attr.get("FieldName")
+                if field_name == "EmployeeId":
+                    attr["FieldValue"] = login.get("UserId")
+                elif field_name == "PeriodFrom":
+                    attr["FieldValue"] = login.get("PeriodFrom")
+                elif field_name == "PeriodTo":
+                    attr["FieldValue"] = login.get("PeriodTo")
+
+        url = direct_url("/prs/Leave.svc/LeaveStatusReport/?FirstNumber=-1&MaxResult=-1", login)
+        headers = {"Content-Type": "application/json", "Login": json.dumps(login)}
+
+        logger.info(f"🔍 Leave Balance URL: {url}")
+        response = session.post(url, json=payload, headers=headers, timeout=60)
+        response.raise_for_status()
+
+        result = parse_api_response(response.json())
+        logger.info(f"✅ Leave balance fetched: {len(result) if isinstance(result, list) else 'non-list'} records")
+        if isinstance(result, list) and result:
+            logger.info(f"🔑 Leave balance record fields: {list(result[0].keys())}")
+            logger.info(f"📄 First record sample: {result[0]}")
+        return result if isinstance(result, list) else []
+
+    except Exception as e:
+        logger.error(f"❌ Failed to fetch leave balance: {e}")
+        return []
+
 
 if __name__ == "__main__":
     print("Leave Client Module Loaded")

@@ -1,25 +1,20 @@
 LEAVE_TYPE_MASTER = {
-    "casual leave":   "-1500000000",
-    "cl":             "-1500000000",
-
-    "absent":         "-1499999999",
-    "a":              "-1499999999",
-
-    "sick leave":     "-1499999998",
-    "sl":             "-1499999998",
-
-    "loss of pay":    "-1499999997",
-    "lop":            "-1499999997",
-
-    "earned leave":   "-1499999996",
-    "el":             "-1499999996",
-
-    "maternity leave":"-1499999995",
-    "ml":             "-1499999995",
-
+    "casual leave": "-1500000000",
+    "cl": "-1500000000",
+    "absent": "-1499999999",
+    "a": "-1499999999",
+    "sick leave": "-1499999998",
+    "sl": "-1499999998",
+    "loss of pay": "-1499999997",
+    "lop": "-1499999997",
+    "earned leave": "-1499999996",
+    "el": "-1499999996",
+    "maternity leave": "-1499999995",
+    "ml": "-1499999995",
     "comp off leave": "-1499999994",
-    "coff":           "-1499999994",
+    "coff": "-1499999994",
 }
+
 
 def map_leave_type_id(value: str) -> str | None:
     """
@@ -30,6 +25,7 @@ def map_leave_type_id(value: str) -> str | None:
 
     key = value.lower().strip()
     return LEAVE_TYPE_MASTER.get(key)
+
 
 REASON_MAP = {
     "personal": ("-1499999996", "Personal"),
