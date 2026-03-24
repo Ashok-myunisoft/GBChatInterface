@@ -83,17 +83,6 @@ def direct_url(path: str, login: Dict[str, Any] = None) -> str:
     return url
 
 
-def proxy_url(path: str, login: Dict[str, Any] = None) -> str:
-    """
-    Build proxy API URL using login object's FEUri and BaseUri if available.
-    This ensures requests go to the correct server/database.
-    """
-    base = settings.get_proxy_url(login)
-    path = path.lstrip("/")
-    url = f"{base}/{path}"
-    logger.debug(f"Proxy URL: {url}")
-    return url
-
 
 # ============================================================
 # Clean Criteria (Remove Empty Fields)
@@ -345,7 +334,7 @@ def apply_leave(slots: Dict[str, Any], login: Dict[str, Any]) -> Dict[str, Any]:
         logger.info(f"🚀 Submitting Leave Payload: {json.dumps(payload, indent=2)}")
         
         # Use HMS endpoint (Correction from previous issue)
-        url = proxy_url("/prs/TLeave.svc", login)
+        url = direct_url("/prs/TLeave.svc", login)
         
         headers = {
             "Content-Type": "application/json",
@@ -394,10 +383,7 @@ def get_leave_balance(login: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Fetch leave balance for the logged-in employee using LeaveStatusReport API."""
     logger.info("📋 Fetching leave balance...")
     try:
-        with open("criteria.json", "r", encoding="utf-8") as f:
-            criteria_data = json.load(f)
-
-        payload = criteria_data.get("LEAVE_BALANCE_CRITERIA")
+        payload = CRITERIA.get("LEAVE_BALANCE_CRITERIA")
         if not payload:
             logger.error("❌ LEAVE_BALANCE_CRITERIA not found in criteria.json")
             return []

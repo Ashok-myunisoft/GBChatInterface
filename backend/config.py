@@ -11,10 +11,6 @@ class Settings(BaseSettings):
     OPENAI_API_KEY: str
 
     # ------------ URL CONFIGURATION ------------
-    GB_CONTEXT: str = "gb4"
-    GB_PROXY_SCRIPT: str = "apps/proxy.php?url="
-
-    DEFAULT_FE_URI: str = "http://183.82.250.223:92/"
     DEFAULT_BASE_URI: str = "newserver:81"
 
     GB_API_TIMEOUT: int = 60
@@ -32,30 +28,15 @@ class Settings(BaseSettings):
     # ============================================================
 
     def get_direct_url(self, login_dto: Dict[str, Any] = None) -> str:
-        base_uri = self.DEFAULT_BASE_URI
+        base_url = self.DEFAULT_BASE_URI
 
-        if login_dto and "BaseUri" in login_dto:
-            base_uri = login_dto["BaseUri"]
+        if login_dto and "BaseURL" in login_dto:
+            base_url = login_dto["BaseURL"]
 
-        if not base_uri.startswith("http"):
-            base_uri = f"http://{base_uri}"
+        if not base_url.startswith("http"):
+            base_url = f"http://{base_url}"
 
-        base_uri = base_uri.rstrip("/")
-
-        return f"{base_uri}/{self.GB_CONTEXT}"
-
-    def get_proxy_url(self, login_dto: Dict[str, Any] = None) -> str:
-        fe_uri = self.DEFAULT_FE_URI
-
-        if login_dto and "FEUri" in login_dto:
-            fe_uri = login_dto["FEUri"]
-
-        if not fe_uri.endswith("/"):
-            fe_uri += "/"
-
-        target_url = self.get_direct_url(login_dto)
-
-        return f"{fe_uri}{self.GB_PROXY_SCRIPT}{target_url}"
+        return base_url.rstrip("/")
 
     # ============================================================
     # 🔥 MISSING ATTRIBUTE – ADDED (NO LOGIC CHANGE)
@@ -81,8 +62,7 @@ class Settings(BaseSettings):
             "UserCode": "SYSTEM",
             "WorkOUId": 0,
             "WorkPeriodId": 0,
-            "BaseUri": self.DEFAULT_BASE_URI,
-            "FEUri": self.DEFAULT_FE_URI,
+            "BaseURL": self.DEFAULT_BASE_URI,
         }
 
 

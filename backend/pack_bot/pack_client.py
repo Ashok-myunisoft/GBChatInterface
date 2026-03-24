@@ -21,7 +21,6 @@ def _build_login_header(login_dto: Dict[str, Any]) -> Dict[str, str]:
             "Login": encoded,
             "Content-Type": "application/json",
             "X-Requested-With": "XMLHttpRequest",
-            "Referer": "http://183.82.250.223:92/apps/main.html",
             "User-Agent": "Mozilla/5.0 GoodbooksBot"
         }
     except Exception as e:
@@ -88,9 +87,9 @@ def get_gb_timestamp():
     return f"/Date({ts})/"
 
 
-def _proxy_url(path: str, login=None) -> str:
-    """Build proxy API URL dynamically from login's FEUri/BaseUri."""
-    base = settings.get_proxy_url(login)
+def direct_url(path: str, login=None) -> str:
+    """Build direct API URL from login's BaseURL."""
+    base = settings.get_direct_url(login)
     path = path.lstrip("/")
     return f"{base}/{path}"
 
@@ -197,15 +196,13 @@ def save_pack(pack: Dict[str,Any], login=None):
         "PackVersion": 1
     }
 
-    url = _proxy_url("mms/Pack.svc/", login)
+    url = direct_url("mms/Pack.svc/", login)
 
     headers = {
         "Login": json.dumps(login),
         "Content-Type": "application/json",
         "X-Requested-With": "XMLHttpRequest",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0)",
-        "Origin": "http://183.82.250.223:92",
-        "Referer": "http://183.82.250.223:92/apps/main.html"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0)"
     }
 
     print("\n=============== FINAL REQUEST SENT ===============")
@@ -230,15 +227,13 @@ def delete_pack(pack_id: int, login_dto=None):
     login = login_dto or settings.GB_LOGIN_DTO
 
     # Correct URL → DELETE with PackId in query string
-    url = _proxy_url(f"mms/Pack.svc/?PackId={pack_id}", login)
+    url = direct_url(f"mms/Pack.svc/?PackId={pack_id}", login)
 
     # CORRECT headers (NO base64, plain JSON!)
     headers = {
         "Login": json.dumps(login),
         "Content-Type": "application/json",
         "X-Requested-With": "XMLHttpRequest",
-        "Referer": "http://183.82.250.223:92/apps/main.html",
-        "Origin": "http://183.82.250.223:92",
         "User-Agent": "Mozilla/5.0"
     }
 

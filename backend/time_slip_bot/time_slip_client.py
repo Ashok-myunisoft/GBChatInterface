@@ -1,5 +1,4 @@
 from urllib.parse import urlparse
-import httpx
 import requests
 import json
 import uuid
@@ -50,19 +49,7 @@ except Exception as e:
 
 
 # ============================================================
-# HTTP CLIENT
-# ============================================================
-
-client = httpx.Client(
-    timeout=settings.GB_API_TIMEOUT or 60.0,
-    headers={
-        'User-Agent': 'TimeSlipClient/1.0',
-        'Accept': 'application/json'
-    }
-)
-
-# ============================================================
-# Persistent Session (for reason API - matches leave_client)
+# Persistent Session
 # ============================================================
 session = requests.Session()
 session.headers.update({
@@ -102,8 +89,6 @@ def _parse_date(val: str) -> datetime:
             return datetime.strptime(clean, fmt)
         except ValueError:
             continue
-
-    raise ValueError(f"Invalid TimeSlipDate format: {val}")
 
     raise ValueError(f"Invalid TimeSlipDate format: {val}")
 
@@ -323,15 +308,6 @@ def direct_url(path: str, login: Dict[str, Any] = None) -> str:
     return url
 
 
-def proxy_url(path: str, login: Dict[str, Any] = None) -> str:
-    """
-    Build proxy API URL using login object's FEUri and BaseUri if available.
-    This ensures requests go to the correct server/database.
-    """
-    base = settings.get_proxy_url(login)
-    path = path.lstrip("/")
-    url = f"{base}/{path}"
-    return url
 
 # ============================================================
 # APPLY TIME SLIP (✅ FIXED)
@@ -444,7 +420,7 @@ def apply_time_slip(slots: Dict[str, Any], login: Dict[str, Any]) -> bool:
     }
 
     # ---------------- SERVICE CALL ----------------
-    url = proxy_url("/prs/TimeSlip.svc/", login)
+    url = direct_url("/prs/TimeSlip.svc/", login)
 
     # Derive Origin and Referer from GB_API_BASE
     parsed_base = urlparse(settings.GB_API_BASE)

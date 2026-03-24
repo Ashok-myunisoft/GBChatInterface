@@ -60,7 +60,10 @@ def parse_login(header):
     try:
         return json.loads(base64.b64decode(header))
     except Exception:
-        return json.loads(header)
+        try:
+            return json.loads(header)
+        except Exception:
+            return settings.GB_LOGIN_DTO
 
 
 class ChatRequest(BaseModel):
