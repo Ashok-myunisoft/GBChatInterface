@@ -47,6 +47,40 @@
       }
     ]
   },
+  "TIMESLIP_BALANCE_CRITERIA": {
+    "SectionCriteriaList": [
+      {
+        "SectionId": 0,
+        "AttributesCriteriaList": [
+          {
+            "FieldName": "PeriodFromDate",
+            "OperationType": 10,
+            "FieldValue": "",
+            "JoinType": 0
+          },
+          {
+            "FieldName": "PeriodToDate",
+            "OperationType": 11,
+            "FieldValue": "",
+            "JoinType": 0
+          },
+          {
+            "FieldName": "EmployeeId",
+            "OperationType": 5,
+            "FieldValue": 0,
+            "JoinType": 2
+          },
+          {
+            "FieldName": "OUId",
+            "OperationType": 5,
+            "FieldValue": 0,
+            "JoinType": 2
+          }
+        ],
+        "OperationType": 0
+      }
+    ]
+  },
   "LEAVE_BALANCE_CRITERIA": {
     "SectionCriteriaList": [
       {

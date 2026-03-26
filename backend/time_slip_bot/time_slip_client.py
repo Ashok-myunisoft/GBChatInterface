@@ -35,9 +35,8 @@ try:
     with open("criteria.json", "r", encoding="utf-8") as f:
         CRITERIA = json.load(f)
     
-    # Reuse LEAVE_REASON_CRITERIA as requested
     LEAVE_REASON_CRITERIA = CRITERIA["LEAVE_REASON_CRITERIA"]
-    logger.info("✓ Criteria loaded successfully form criteria.json")
+    logger.info("✓ Criteria loaded successfully from criteria.json")
     
 except FileNotFoundError:
     logger.error("❌ criteria.json file not found!")
@@ -475,3 +474,47 @@ def apply_time_slip(slots: Dict[str, Any], login: Dict[str, Any]) -> bool:
     except Exception as e:
         logger.error(f"❌ Failed to save time slip: {e}")
         raise
+
+
+# ============================================================
+# GET TIME SLIP (PERMISSION) BALANCE
+# ============================================================
+
+def get_time_slip_balance(login: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Fetch permission balance for the logged-in employee using TimeSlipSummary API."""
+    logger.info("📋 Fetching permission balance...")
+    try:
+        payload = CRITERIA.get("TIMESLIP_BALANCE_CRITERIA")
+        if not payload:
+            logger.error("❌ TIMESLIP_BALANCE_CRITERIA not found in criteria.json")
+            return []
+
+        import copy
+        payload = copy.deepcopy(payload)
+
+        for section in payload.get("SectionCriteriaList", []):
+            for attr in section.get("AttributesCriteriaList", []):
+                field_name = attr.get("FieldName")
+                if field_name == "EmployeeId":
+                    attr["FieldValue"] = login.get("UserId")
+                elif field_name == "OUId":
+                    attr["FieldValue"] = login.get("WorkOUId")
+                elif field_name == "PeriodFromDate":
+                    attr["FieldValue"] = login.get("PeriodFrom", attr["FieldValue"])
+                elif field_name == "PeriodToDate":
+                    attr["FieldValue"] = login.get("PeriodTo", attr["FieldValue"])
+
+        url = direct_url("/prs/TimeSlip.svc/TimeSlipSummary", login)
+        headers = {"Content-Type": "application/json", "Login": json.dumps(login)}
+
+        logger.info(f"🔍 Permission Balance URL: {url}")
+        response = session.post(url, json=payload, headers=headers, timeout=60)
+        response.raise_for_status()
+
+        result = parse_api_response(response.json())
+        logger.info(f"✅ Permission balance fetched: {len(result) if isinstance(result, list) else 'non-list'} records")
+        return result if isinstance(result, list) else []
+
+    except Exception as e:
+        logger.error(f"❌ Failed to fetch permission balance: {e}")
+        return []

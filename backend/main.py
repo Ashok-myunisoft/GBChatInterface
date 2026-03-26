@@ -33,7 +33,8 @@ from time_slip_bot.time_slip_agent import (
 )
 from time_slip_bot.time_slip_client import (
     apply_time_slip,
-    get_time_slip_reasons
+    get_time_slip_reasons,
+    get_time_slip_balance
 )
 
 
@@ -138,6 +139,7 @@ def _extract_time(text: str):
 
 
 _BALANCE_KEYWORDS = ["balance", "available", "remaining", "left", "how many"]
+_PERMISSION_BALANCE_KEYWORDS = ["permission", "time slip", "timeslip", "permission balance"]
 
 # Maps keywords/aliases a user might say → canonical leave type name fragment
 # Used for partial matching against the API's leave type name field
@@ -165,6 +167,20 @@ def _is_balance_query(message: str) -> bool:
     words = re.findall(r'\b\w+\b', msg)
     has_leave = "leave" in msg or _fuzzy_in(words, "leave")
     if not has_leave:
+        return False
+    return (
+        any(k in msg for k in _BALANCE_KEYWORDS) or
+        any(_fuzzy_in(words, k) for k in _BALANCE_KEYWORDS)
+    )
+
+
+def _is_permission_balance_query(message: str) -> bool:
+    """Return True if the message is asking about permission/time slip balance."""
+    msg = message.lower()
+    words = re.findall(r'\b\w+\b', msg)
+    has_permission = any(k in msg for k in _PERMISSION_BALANCE_KEYWORDS) or \
+                     _fuzzy_in(words, "permission") or _fuzzy_in(words, "timeslip")
+    if not has_permission:
         return False
     return (
         any(k in msg for k in _BALANCE_KEYWORDS) or
@@ -220,6 +236,32 @@ def _format_balance_response(balances: list, filter_type: Optional[str] = None) 
     lines = ["Your leave balances are:\n"]
     for b in balances:
         lines.append(f"{_name(b)}: {_available(b)} days")
+    return "\n".join(lines)
+
+
+def _format_permission_balance_response(records: list) -> str:
+    if not records:
+        return "No permission balance information found."
+
+    lines = ["Your permission balance:\n"]
+    for r in records:
+        # Try common field name patterns the API might return
+        name = (r.get("TimeSlipTypeName") or r.get("PermissionType") or
+                r.get("Name") or r.get("Type") or "Permission")
+        available = (r.get("AvailableHours") if r.get("AvailableHours") is not None else
+                     r.get("Available") if r.get("Available") is not None else
+                     r.get("Balance") if r.get("Balance") is not None else
+                     r.get("RemainingHours") if r.get("RemainingHours") is not None else None)
+        used = (r.get("UsedHours") if r.get("UsedHours") is not None else
+                r.get("Used") if r.get("Used") is not None else None)
+
+        line = f"  {name}"
+        if available is not None:
+            line += f": {available} hrs available"
+        if used is not None:
+            line += f" | {used} hrs used"
+        lines.append(line)
+
     return "\n".join(lines)
 
 
@@ -372,6 +414,8 @@ async def chat(req: ChatRequest, Login: Optional[str] = Header(None)):
         GREETED_USERS.add(user_id)
         try:
             balances = get_leave_balance(login)
+            perm_records = get_time_slip_balance(login)
+
             balance_lines = []
             warnings = []
 
@@ -391,19 +435,22 @@ async def chat(req: ChatRequest, Login: Optional[str] = Header(None)):
                 balance_lines.append(f"  {name}: {avail} days")
                 if "casual" in name.lower() and float(avail or 0) <= 0:
                     warnings.append(
-                        f"⚠️ You have no Casual Leave remaining. "
-                        f"You can apply for other available leave types."
+                        "⚠️ You have no Casual Leave remaining. "
+                        "You can apply for other available leave types."
                     )
 
+            greeting = ""
             if balance_lines:
-                balance_text = "Here are your current leave balances:\n" + "\n".join(balance_lines)
+                greeting += "Here are your current leave balances:\n" + "\n".join(balance_lines)
                 if warnings:
-                    balance_text += "\n\n" + "\n".join(warnings)
-                balance_text += "\n\nI can help you apply Leave, submit a Time Slip, or create a Pack."
-            else:
-                balance_text = "Hello! 👋 I can help you apply Leave, submit a Time Slip, or create a Pack."
+                    greeting += "\n\n" + "\n".join(warnings)
 
-            return {"status": "success", "message": balance_text}
+            if perm_records:
+                perm_text = _format_permission_balance_response(perm_records)
+                greeting += ("\n\n" if greeting else "") + perm_text
+
+            greeting += "\n\nI can help you apply Leave, submit a Time Slip, or create a Pack."
+            return {"status": "success", "message": greeting.strip()}
 
         except Exception:
             return {
@@ -427,6 +474,19 @@ async def chat(req: ChatRequest, Login: Optional[str] = Header(None)):
             return {
                 "status": "error",
                 "message": "Unable to fetch leave balance at the moment. Please try again later."
+            }
+
+    if _is_permission_balance_query(message):
+        try:
+            records = get_time_slip_balance(login)
+            return {
+                "status": "success",
+                "message": _format_permission_balance_response(records)
+            }
+        except Exception:
+            return {
+                "status": "error",
+                "message": "Unable to fetch permission balance at the moment. Please try again later."
             }
 
     # ========================================================
