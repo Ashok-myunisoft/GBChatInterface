@@ -16,6 +16,9 @@ class Settings(BaseSettings):
     GB_API_TIMEOUT: int = 60
     GB_MOCK_MODE: bool = False
 
+    WEEKOFF_DAYS: str = "6"          # 0=Mon … 6=Sun, comma-separated
+    HOLIDAY_COUNTRY_CODE: str = "IN"
+
     DEBUG: bool = True
     LOG_LEVEL: str = "INFO"
 

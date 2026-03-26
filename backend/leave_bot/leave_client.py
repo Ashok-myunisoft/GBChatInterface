@@ -334,7 +334,7 @@ def apply_leave(slots: Dict[str, Any], login: Dict[str, Any]) -> Dict[str, Any]:
         logger.info(f"🚀 Submitting Leave Payload: {json.dumps(payload, indent=2)}")
         
         # Use HMS endpoint (Correction from previous issue)
-        url = direct_url("/prs/TLeave.svc", login)
+        url = direct_url("/prs/TLeave.svc/", login)
         
         headers = {
             "Content-Type": "application/json",

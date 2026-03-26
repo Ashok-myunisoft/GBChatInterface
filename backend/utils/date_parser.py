@@ -34,29 +34,42 @@ def parse_date(text: str) -> str | None:
     if t == "yesterday":
         return (today - timedelta(days=1)).strftime("%d-%m-%Y")
         
-    # ---------------- NEXT / LAST WEEKDAY ----------------
-    # "next monday", "last friday"
-    weekdays = list(calendar.day_name) # ['Monday', 'Tuesday', ...]
+    # ---------------- NEXT / LAST / THIS / BARE WEEKDAY ----------------
+    weekdays = list(calendar.day_name)  # ['Monday', 'Tuesday', ...]
     weekdays_lower = [d.lower() for d in weekdays]
-    
-    m = re.search(r"(next|last)\s+([a-z]+)", t)
+
+    m = re.search(r"(next|last|this)\s+([a-z]+)", t)
     if m:
         direction, day_name = m.groups()
         if day_name in weekdays_lower:
             target_idx = weekdays_lower.index(day_name)
             current_idx = today.weekday()
-            
+
             if direction == "next":
                 days_ahead = target_idx - current_idx
-                if days_ahead <= 0: # Target is today or earlier in week -> move to next week
+                if days_ahead <= 0:
                     days_ahead += 7
                 return (today + timedelta(days=days_ahead)).strftime("%d-%m-%Y")
-                
+
             elif direction == "last":
                 days_behind = current_idx - target_idx
                 if days_behind <= 0:
                     days_behind += 7
                 return (today - timedelta(days=days_behind)).strftime("%d-%m-%Y")
+
+            elif direction == "this":
+                days_ahead = target_idx - current_idx
+                if days_ahead < 0:
+                    days_ahead += 7
+                return (today + timedelta(days=days_ahead)).strftime("%d-%m-%Y")
+
+    # bare weekday name: "saturday", "monday" → next upcoming occurrence
+    for idx, day_name in enumerate(weekdays_lower):
+        if re.search(rf"\b{day_name}\b", t):
+            days_ahead = idx - today.weekday()
+            if days_ahead <= 0:
+                days_ahead += 7
+            return (today + timedelta(days=days_ahead)).strftime("%d-%m-%Y")
 
     # ---------------- ABSOLUTE DATES ----------------
     # YYYY-MM-DD (ISO format — must check BEFORE DD-MM-YY to avoid substring misparse)

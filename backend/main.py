@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from config import settings
+from utils.holiday_checker import check_date_warning
 
 # ---------------- PACK ----------------
 from pack_bot.agent import call_ollama_chat, normalize_slots
@@ -77,6 +78,7 @@ class ChatRequest(BaseModel):
 PACK_STATE = {}
 LEAVE_STATE = {}
 TIME_SLIP_STATE = {}
+GREETED_USERS: set = set()
 
 # Last-active timestamp per user (for TTL-based expiry)
 _STATE_TS: dict = {}
@@ -99,6 +101,7 @@ def _cleanup_expired():
         LEAVE_STATE.pop(uid, None)
         TIME_SLIP_STATE.pop(uid, None)
         _STATE_TS.pop(uid, None)
+        GREETED_USERS.discard(uid)
 
 
 # ============================================================
@@ -362,6 +365,53 @@ async def chat(req: ChatRequest, Login: Optional[str] = Header(None)):
     ts_state = TIME_SLIP_STATE[user_id]
 
     # ========================================================
+    # FIRST MESSAGE GREETING — show leave balance once per session
+    # ========================================================
+
+    if user_id not in GREETED_USERS:
+        GREETED_USERS.add(user_id)
+        try:
+            balances = get_leave_balance(login)
+            balance_lines = []
+            warnings = []
+
+            def _name(b):
+                return (b.get("LeaveName") or b.get("LeaveTypeName") or
+                        b.get("TLeaveTypeName") or b.get("Name") or "")
+
+            def _available(b):
+                for key in ("LeaveBalance", "AvailableLeave", "TAvailableLeave", "Available", "Balance"):
+                    if b.get(key) is not None:
+                        return b[key]
+                return 0
+
+            for b in balances:
+                name = _name(b)
+                avail = _available(b)
+                balance_lines.append(f"  {name}: {avail} days")
+                if "casual" in name.lower() and float(avail or 0) <= 0:
+                    warnings.append(
+                        f"⚠️ You have no Casual Leave remaining. "
+                        f"You can apply for other available leave types."
+                    )
+
+            if balance_lines:
+                balance_text = "Here are your current leave balances:\n" + "\n".join(balance_lines)
+                if warnings:
+                    balance_text += "\n\n" + "\n".join(warnings)
+                balance_text += "\n\nI can help you apply Leave, submit a Time Slip, or create a Pack."
+            else:
+                balance_text = "Hello! 👋 I can help you apply Leave, submit a Time Slip, or create a Pack."
+
+            return {"status": "success", "message": balance_text}
+
+        except Exception:
+            return {
+                "status": "success",
+                "message": "Hello! 👋 I can help you apply Leave, submit a Time Slip, or create a Pack."
+            }
+
+    # ========================================================
     # LEAVE BALANCE QUERY — handled immediately, no state change
     # ========================================================
 
@@ -459,9 +509,11 @@ async def chat(req: ChatRequest, Login: Optional[str] = Header(None)):
             leave_state["last_options"] = options
             leave_state["awaiting_field"] = "LeaveType"
             options_text = "\n".join(f"{i+1}. {o['label']}" for i, o in enumerate(options))
+            warning = check_date_warning(leave_state["slots"].get("FromDate", ""))
+            prefix = f"{warning}\n\n" if warning else ""
             return {
                 "status": "success",
-                "message": f"Please select Leave Type from the options below:\n{options_text}\n\nReply with the number of your choice."
+                "message": f"{prefix}Please select Leave Type from the options below:\n{options_text}\n\nReply with the number of your choice."
             }
 
         if not leave_state["slots"].get("FromDate"):
@@ -612,7 +664,9 @@ async def chat(req: ChatRequest, Login: Optional[str] = Header(None)):
 
         if not ts_state["slots"].get("FromTime"):
             ts_state["awaiting_field"] = "FromTime"
-            return {"status": "success", "message": "Please provide From Time (HH:MM)."}
+            warning = check_date_warning(ts_state["slots"].get("TimeSlipDate", ""))
+            prefix = f"{warning}\n\n" if warning else ""
+            return {"status": "success", "message": f"{prefix}Please provide From Time (HH:MM)."}
 
         if not ts_state["slots"].get("ToTime"):
             ts_state["awaiting_field"] = "ToTime"
