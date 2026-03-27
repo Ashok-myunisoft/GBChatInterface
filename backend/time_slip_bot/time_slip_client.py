@@ -541,6 +541,8 @@ def get_time_slip_balance(login: Dict[str, Any]) -> List[Dict[str, Any]]:
 
         result = parse_api_response(response.json())
         logger.info(f"✅ Permission balance fetched: {len(result) if isinstance(result, list) else 'non-list'} records")
+        if result:
+            logger.info(f"📋 Permission balance raw record: {json.dumps(result[0] if isinstance(result, list) else result, indent=2)}")
         return result if isinstance(result, list) else []
 
     except Exception as e:
