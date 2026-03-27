@@ -243,24 +243,24 @@ def _format_permission_balance_response(records: list) -> str:
     if not records:
         return "No permission balance information found."
 
-    lines = ["Your permission balance:\n"]
+    lines = ["Your permission balance:"]
     for r in records:
-        # Try common field name patterns the API might return
-        name = (r.get("TimeSlipTypeName") or r.get("PermissionType") or
-                r.get("Name") or r.get("Type") or "Permission")
-        available = (r.get("AvailableHours") if r.get("AvailableHours") is not None else
-                     r.get("Available") if r.get("Available") is not None else
-                     r.get("Balance") if r.get("Balance") is not None else
-                     r.get("RemainingHours") if r.get("RemainingHours") is not None else None)
-        used = (r.get("UsedHours") if r.get("UsedHours") is not None else
-                r.get("Used") if r.get("Used") is not None else None)
+        balance_hours = r.get("BalanceHours")
+        balance_times = r.get("BalanceTimes")
+        taken_times   = r.get("PermissionTakenTimes")
+        used_hours    = r.get("TimeSlipDuration")
 
-        line = f"  {name}"
-        if available is not None:
-            line += f": {available} hrs available"
-        if used is not None:
-            line += f" | {used} hrs used"
-        lines.append(line)
+        parts = []
+        if balance_hours is not None:
+            parts.append(f"{balance_hours} hrs remaining")
+        if balance_times is not None:
+            parts.append(f"{int(balance_times)} time(s) remaining")
+        if taken_times is not None:
+            parts.append(f"{int(taken_times)} time(s) used")
+        if used_hours is not None:
+            parts.append(f"{used_hours} hrs used")
+
+        lines.append("  " + " | ".join(parts) if parts else "  No data available")
 
     return "\n".join(lines)
 
