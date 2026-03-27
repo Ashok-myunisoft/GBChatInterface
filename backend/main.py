@@ -243,24 +243,29 @@ def _format_permission_balance_response(records: list) -> str:
     if not records:
         return "No permission balance information found."
 
-    lines = ["Your permission balance:"]
-    for r in records:
-        balance_hours = r.get("BalanceHours")
-        balance_times = r.get("BalanceTimes")
-        taken_times   = r.get("PermissionTakenTimes")
-        used_hours    = r.get("TimeSlipDuration")
+    from datetime import datetime
+    r = records[0]
 
-        parts = []
-        if balance_hours is not None:
-            parts.append(f"{balance_hours} hrs remaining")
-        if balance_times is not None:
-            parts.append(f"{int(balance_times)} time(s) remaining")
-        if taken_times is not None:
-            parts.append(f"{int(taken_times)} time(s) used")
-        if used_hours is not None:
-            parts.append(f"{used_hours} hrs used")
+    balance_hours = r.get("BalanceHours", 0)
+    balance_times = int(r.get("BalanceTimes", 0))
+    taken_times   = int(r.get("PermissionTakenTimes", 0))
+    used_hours    = r.get("TimeSlipDuration", 0)
+    month         = r.get("MonthPart") or datetime.now().month
+    year          = r.get("YearPart") or datetime.now().year
 
-        lines.append("  " + " | ".join(parts) if parts else "  No data available")
+    total_times = taken_times + balance_times
+    total_hours = round(used_hours + balance_hours, 2)
+    month_name  = datetime(year, month, 1).strftime("%B %Y")
+
+    lines = [
+        f"Permission balance for {month_name}:",
+        f"  Total allowed : {total_times} time(s)  ({total_hours} hrs)",
+        f"  Used          : {taken_times} time(s)  ({used_hours} hrs)",
+        f"  Remaining     : {balance_times} time(s)  ({balance_hours} hrs)",
+    ]
+
+    if balance_times == 0 or balance_hours <= 0:
+        lines.append("  ⚠️ No permission balance remaining this month.")
 
     return "\n".join(lines)
 
