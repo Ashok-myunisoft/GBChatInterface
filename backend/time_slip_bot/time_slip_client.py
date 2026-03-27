@@ -480,6 +480,30 @@ def apply_time_slip(slots: Dict[str, Any], login: Dict[str, Any]) -> bool:
 # GET TIME SLIP (PERMISSION) BALANCE
 # ============================================================
 
+def _period_epoch_timestamps() -> tuple:
+    """Return (from_epoch_str, to_epoch_str) for start/end of current month as Unix timestamp strings (seconds)."""
+    import calendar as _cal
+    now = datetime.utcnow()
+    start = datetime(now.year, now.month, 1)
+    end_day = _cal.monthrange(now.year, now.month)[1]
+    end = datetime(now.year, now.month, end_day, 23, 59, 59)
+    return str(int(start.timestamp())), str(int(end.timestamp()))
+
+
+def _to_epoch_str(gb_val) -> str | None:
+    """Convert GB /Date(ms)/ or numeric string to epoch seconds string."""
+    if gb_val is None:
+        return None
+    val = str(gb_val)
+    m = re.search(r"/Date\((\d+)\)/", val)
+    if m:
+        return str(int(m.group(1)) // 1000)
+    if val.isdigit():
+        ts = int(val)
+        return str(ts // 1000) if ts > 9_999_999_999 else val
+    return None
+
+
 def get_time_slip_balance(login: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Fetch permission balance for the logged-in employee using TimeSlipSummary API."""
     logger.info("📋 Fetching permission balance...")
@@ -492,6 +516,10 @@ def get_time_slip_balance(login: Dict[str, Any]) -> List[Dict[str, Any]]:
         import copy
         payload = copy.deepcopy(payload)
 
+        period_from, period_to = _period_epoch_timestamps()
+        period_from = _to_epoch_str(login.get("PeriodFrom")) or period_from
+        period_to   = _to_epoch_str(login.get("PeriodTo"))   or period_to
+
         for section in payload.get("SectionCriteriaList", []):
             for attr in section.get("AttributesCriteriaList", []):
                 field_name = attr.get("FieldName")
@@ -500,9 +528,9 @@ def get_time_slip_balance(login: Dict[str, Any]) -> List[Dict[str, Any]]:
                 elif field_name == "OUId":
                     attr["FieldValue"] = login.get("WorkOUId")
                 elif field_name == "PeriodFromDate":
-                    attr["FieldValue"] = login.get("PeriodFrom", attr["FieldValue"])
+                    attr["FieldValue"] = period_from
                 elif field_name == "PeriodToDate":
-                    attr["FieldValue"] = login.get("PeriodTo", attr["FieldValue"])
+                    attr["FieldValue"] = period_to
 
         url = direct_url("/prs/TimeSlip.svc/TimeSlipSummary", login)
         headers = {"Content-Type": "application/json", "Login": json.dumps(login)}
