@@ -395,6 +395,8 @@ def apply_time_slip(slots: Dict[str, Any], login: Dict[str, Any]) -> bool:
         "TimeSlipDuration": duration,
         "TimeSlipStartTime": _to_minutes(from_time),
         "TimeSlipEndTime": _to_minutes(to_time),
+        "TimeSlipFromTime": from_time,
+        "TimeSlipToTime": to_time,
 
         "DepartmentName": login.get("DepartmentName", ""),
         "DesignationName": login.get("DesignationName", ""),
@@ -468,8 +470,19 @@ def apply_time_slip(slots: Dict[str, Any], login: Dict[str, Any]) -> bool:
         # Raise if NOT 2xx
         response.raise_for_status()
 
-        # ✅ SUCCESS
-        return True
+        # ✅ SUCCESS — try to extract TimeSlipNumber from response
+        ts_number = None
+        try:
+            if response.status_code != 204:
+                result = parse_api_response(response_json)
+                if isinstance(result, list) and result:
+                    ts_number = result[0].get("TimeSlipNumber")
+                elif isinstance(result, dict):
+                    ts_number = result.get("TimeSlipNumber")
+        except Exception:
+            pass
+
+        return ts_number
 
     except Exception as e:
         logger.error(f"❌ Failed to save time slip: {e}")

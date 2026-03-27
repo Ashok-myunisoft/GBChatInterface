@@ -250,7 +250,8 @@ def _parse_date(val: str) -> Optional[datetime]:
     return None
 
 def _gb_date(dt: datetime) -> str:
-    timestamp_ms = int(dt.timestamp() * 1000)
+    # Use UTC midnight to avoid IST server timezone shifting the date
+    timestamp_ms = calendar.timegm(dt.timetuple()) * 1000
     return f"/Date({timestamp_ms})/"
 
 
@@ -313,18 +314,18 @@ def apply_leave(slots: Dict[str, Any], login: Dict[str, Any]) -> Dict[str, Any]:
                     "LeaveDayName": day_name,
                     "LeaveTypeId": leave_type_id,
                     "TLeaveDetailLeaveDate": _gb_date(from_dt),
-                    "TLeaveDetailLeaveDayType": slots.get("TLeaveDayTypeCode", "0"),
-                    "TLeaveDetailNumberOfDays": str(days),
+                    "TLeaveDetailLeaveDayType": int(slots.get("TLeaveDayTypeCode", 0)),
+                    "TLeaveDetailNumberOfDays": float(days),
                     "TLeaveDetailSlNo": 1,
                     "TLeaveDetailValidTill": _gb_date(to_dt)
                 }
             ],
             "TLeaveId": 0,
             "TLeaveLeaveDate": _gb_date(from_dt),
-            "TLeaveLeaveNumber": "",
-            "TLeaveNumberOfDays": str(days),
+            "TLeaveLeaveNumber": 0,
+            "TLeaveNumberOfDays": float(days),
             "TLeaveReferenceDate": _gb_date(from_dt),
-            "TLeaveReferenceNumber": "0",
+            "TLeaveReferenceNumber": 0,
             "TLeaveRemarks": reason_name,
             "TLeaveStatus": 1,
             "TLeaveType": leave_type_name,

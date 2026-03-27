@@ -348,12 +348,28 @@ def create_pack(slots, login):
     }
 
 
+def _extract_leave_number(result) -> str:
+    """Extract leave number from apply_leave API response."""
+    try:
+        from leave_bot.leave_client import parse_api_response
+        data = parse_api_response(result)
+        if isinstance(data, list) and data:
+            return data[0].get("TLeaveLeaveNumber") or data[0].get("LeaveNumber") or ""
+        if isinstance(data, dict):
+            return data.get("TLeaveLeaveNumber") or data.get("LeaveNumber") or ""
+    except Exception:
+        pass
+    return ""
+
+
 def apply_leave_flow(slots, login):
     try:
-        apply_leave(slots, login)
+        result = apply_leave(slots, login)
+        leave_number = _extract_leave_number(result)
+        number_text = f" (Leave No: {leave_number})" if leave_number else ""
         return {
             "status": "success",
-            "message": f"Leave applied successfully ✅ for {slots.get('EmployeeName')}"
+            "message": f"Leave applied successfully ✅ for {slots.get('EmployeeName')}{number_text}"
         }
     except Exception as e:
         error_msg = str(e)
@@ -370,10 +386,11 @@ def apply_leave_flow(slots, login):
 
 def apply_time_slip_flow(slots, login):
     try:
-        apply_time_slip(slots, login)
+        ts_number = apply_time_slip(slots, login)
+        number_text = f" (Permission No: {ts_number})" if ts_number else ""
         return {
             "status": "success",
-            "message": "Time Slip applied successfully ✅"
+            "message": f"Permission applied successfully ✅{number_text}"
         }
     except Exception as e:
         error_msg = str(e)
