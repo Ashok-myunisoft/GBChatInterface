@@ -377,10 +377,34 @@ def _extract_leave_number(result) -> str:
     return ""
 
 
+def _extract_decoded_service_body(payload):
+    """Extract and decode the service body from a raw response payload."""
+    if not payload:
+        return None
+
+    candidate = payload
+    if isinstance(payload, dict) and "body" in payload:
+        candidate = payload.get("body")
+
+    if not isinstance(candidate, dict) or not candidate:
+        return None
+
+    try:
+        from leave_bot.leave_client import parse_api_response
+        decoded = parse_api_response(candidate)
+        if decoded in (None, "", [], {}):
+            return None
+        return decoded
+    except Exception:
+        return None
+
+
 def _format_service_body(body) -> str:
-    """Convert a raw service response into readable text for chat output."""
+    """Convert a decoded service response into readable text for chat output."""
     if body in (None, "", [], {}):
         return ""
+    if isinstance(body, str):
+        return body.strip()
     try:
         return json.dumps(body, indent=2, ensure_ascii=False, default=str)
     except Exception:
@@ -390,12 +414,14 @@ def _format_service_body(body) -> str:
 def apply_leave_flow(slots, login):
     try:
         result = apply_leave(slots, login)
-        leave_number = _extract_leave_number(result)
-        number_text = f" (Leave No: {leave_number})" if leave_number else ""
-        body_text = _format_service_body(result)
-        message = f"Leave applied successfully ✅ for {slots.get('EmployeeName')}{number_text}"
+        decoded_body = _extract_decoded_service_body(result)
+        body_text = _format_service_body(decoded_body)
         if body_text:
-            message += f"\n\nService response:\n{body_text}"
+            message = body_text
+        else:
+            leave_number = _extract_leave_number(result)
+            number_text = f" (Leave No: {leave_number})" if leave_number else ""
+            message = f"Leave applied successfully ✅ for {slots.get('EmployeeName')}{number_text}"
         return {
             "status": "success",
             "message": message
@@ -425,13 +451,15 @@ def apply_time_slip_flow(slots, login):
         else:
             ts_number = result or ""
 
-        number_text = f" (Permission No: {ts_number})" if ts_number else ""
-        body_text = _format_service_body(body)
-        message = f"Permission applied successfully ✅{number_text}"
+        decoded_body = _extract_decoded_service_body(body)
+        body_text = _format_service_body(decoded_body)
         if body_text:
-            message += f"\n\nService response:\n{body_text}"
-        elif body is None:
-            message += "\n\nService response: No response body returned by service."
+            message = body_text
+        else:
+            number_text = f" (Permission No: {ts_number})" if ts_number else ""
+            message = f"Permission applied successfully ✅{number_text}"
+            if body is None:
+                message += "\n\nService response: No response body returned by service."
         return {
             "status": "success",
             "message": message
