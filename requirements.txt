@@ -6,8 +6,9 @@ python-dotenv
 requests
 langchain
 langchain_community
-ollama 
+ollama
 langchain_openai
+holidays
 
 
 

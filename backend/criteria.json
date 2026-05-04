@@ -111,5 +111,56 @@
         "OperationType": 0
       }
     ]
+  },
+  "PARTY_CRITERIA": {
+    "SectionCriteriaList": [
+      {
+        "AttributesCriteriaList": [
+          {
+            "FieldName": "Name",
+            "FieldValue": "",
+            "InArray": null,
+            "JoinType": 0,
+            "OperationType": 2
+          }
+        ],
+        "OperationType": 0,
+        "SectionId": 0
+      }
+    ]
+  },
+  "ITEM_CRITERIA": {
+    "SectionCriteriaList": [
+      {
+        "AttributesCriteriaList": [
+          {
+            "FieldName": "Name",
+            "FieldValue": "",
+            "InArray": null,
+            "JoinType": 0,
+            "OperationType": 2
+          }
+        ],
+        "OperationType": 0,
+        "SectionId": 0
+      }
+    ]
+  },
+  "STORE_CRITERIA": {
+    "SectionCriteriaList": [
+      {
+        "AttributesCriteriaList": [
+          {
+            "FieldName": "Name",
+            "FieldValue": "",
+            "InArray": null,
+            "JoinType": 0,
+            "OperationType": 2
+          }
+        ],
+        "OperationType": 0,
+        "SectionId": 0
+      }
+    ]
   }
 }

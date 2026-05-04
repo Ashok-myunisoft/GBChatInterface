@@ -37,6 +37,10 @@ from time_slip_bot.time_slip_client import (
     get_time_slip_balance
 )
 
+# ---------------- PURCHASE ORDER ----------------
+from purchase_bot.purchase_agent import call_purchase_chat, normalize_purchase_slots
+from purchase_bot.purchase_client import create_purchase_order, get_parties, get_items, get_stores
+
 
 # ============================================================
 # FASTAPI SETUP
@@ -79,6 +83,7 @@ class ChatRequest(BaseModel):
 PACK_STATE = {}
 LEAVE_STATE = {}
 TIME_SLIP_STATE = {}
+PURCHASE_STATE = {}
 GREETED_USERS: set = set()
 
 # Last-active timestamp per user (for TTL-based expiry)
@@ -101,6 +106,7 @@ def _cleanup_expired():
         PACK_STATE.pop(uid, None)
         LEAVE_STATE.pop(uid, None)
         TIME_SLIP_STATE.pop(uid, None)
+        PURCHASE_STATE.pop(uid, None)
         _STATE_TS.pop(uid, None)
         GREETED_USERS.discard(uid)
 
@@ -306,10 +312,19 @@ def resolve_intent(message: str) -> str:
     if "today" in msg:
         ts_score += 1
 
-    if leave_score > ts_score:
+    # -------- PURCHASE SIGNALS --------
+    purchase_score = 0
+    if any(k in msg for k in ["purchase", "po", "purchase order", "buy", "procure"]):
+        purchase_score += 3
+    if any(k in msg for k in ["vendor", "supplier", "party", "item", "material", "goods"]):
+        purchase_score += 2
+
+    if leave_score > ts_score and leave_score > purchase_score:
         return "leave"
-    if ts_score > leave_score:
+    if ts_score > leave_score and ts_score > purchase_score:
         return "time_slip"
+    if purchase_score > leave_score and purchase_score > ts_score:
+        return "purchase"
 
     return "unknown"
 
@@ -362,14 +377,28 @@ def _extract_leave_number(result) -> str:
     return ""
 
 
+def _format_service_body(body) -> str:
+    """Convert a raw service response into readable text for chat output."""
+    if body in (None, "", [], {}):
+        return ""
+    try:
+        return json.dumps(body, indent=2, ensure_ascii=False, default=str)
+    except Exception:
+        return str(body)
+
+
 def apply_leave_flow(slots, login):
     try:
         result = apply_leave(slots, login)
         leave_number = _extract_leave_number(result)
         number_text = f" (Leave No: {leave_number})" if leave_number else ""
+        body_text = _format_service_body(result)
+        message = f"Leave applied successfully ✅ for {slots.get('EmployeeName')}{number_text}"
+        if body_text:
+            message += f"\n\nService response:\n{body_text}"
         return {
             "status": "success",
-            "message": f"Leave applied successfully ✅ for {slots.get('EmployeeName')}{number_text}"
+            "message": message
         }
     except Exception as e:
         error_msg = str(e)
@@ -386,11 +415,26 @@ def apply_leave_flow(slots, login):
 
 def apply_time_slip_flow(slots, login):
     try:
-        ts_number = apply_time_slip(slots, login)
+        result = apply_time_slip(slots, login)
+        ts_number = ""
+        body = None
+
+        if isinstance(result, dict):
+            ts_number = result.get("permission_number") or ""
+            body = result.get("body")
+        else:
+            ts_number = result or ""
+
         number_text = f" (Permission No: {ts_number})" if ts_number else ""
+        body_text = _format_service_body(body)
+        message = f"Permission applied successfully ✅{number_text}"
+        if body_text:
+            message += f"\n\nService response:\n{body_text}"
+        elif body is None:
+            message += "\n\nService response: No response body returned by service."
         return {
             "status": "success",
-            "message": f"Permission applied successfully ✅{number_text}"
+            "message": message
         }
     except Exception as e:
         error_msg = str(e)
@@ -403,6 +447,69 @@ def apply_time_slip_flow(slots, login):
             "status": "error",
             "message": f"Failed to apply time slip: {error_msg}"
         }
+
+
+# ============================================================
+# PURCHASE HELPERS
+# ============================================================
+
+def _first_non_empty(item: dict, *keys, default=""):
+    for key in keys:
+        value = item.get(key)
+        if value not in (None, ""):
+            return value
+    return default
+
+
+def _best_match_record(records: list, needle: str, *, name_keys=(), code_keys=(), id_keys=()):
+    if not needle:
+        return None
+
+    normalized = str(needle).strip().lower()
+    if not normalized:
+        return None
+
+    prepared = []
+    for record in records or []:
+        name = str(_first_non_empty(record, *name_keys, default="")).strip()
+        code = str(_first_non_empty(record, *code_keys, default="")).strip() if code_keys else ""
+        rec_id = str(_first_non_empty(record, *id_keys, default="")).strip() if id_keys else ""
+
+        if name and normalized == name.lower():
+            return record
+        if code and normalized == code.lower():
+            return record
+        if rec_id and normalized == rec_id.lower():
+            return record
+
+        if name:
+            prepared.append((name.lower(), record))
+
+    if prepared:
+        close = difflib.get_close_matches(normalized, [name for name, _ in prepared], n=1, cutoff=0.8)
+        if close:
+            close_name = close[0]
+            for name, record in prepared:
+                if name == close_name:
+                    return record
+
+    return None
+
+
+def _build_options(records: list, *, label_keys=(), value_keys=(), code_keys=()):
+    options = []
+    for record in records or []:
+        label = str(_first_non_empty(record, *label_keys, default="")).strip()
+        value = _first_non_empty(record, *value_keys, default="")
+        if not label:
+            continue
+        options.append({
+            "label": label,
+            "value": value,
+            "code": str(_first_non_empty(record, *code_keys, default="")).strip() if code_keys else "",
+            "record": record
+        })
+    return options
 
 
 # ============================================================
@@ -423,10 +530,12 @@ async def chat(req: ChatRequest, Login: Optional[str] = Header(None)):
     PACK_STATE.setdefault(user_id, {"intent": None, "slots": {}, "awaiting": None})
     LEAVE_STATE.setdefault(user_id, {"intent": None, "slots": {}})
     TIME_SLIP_STATE.setdefault(user_id, {"intent": None, "slots": {}})
+    PURCHASE_STATE.setdefault(user_id, {"intent": None, "slots": {}})
 
     pack_state = PACK_STATE[user_id]
     leave_state = LEAVE_STATE[user_id]
     ts_state = TIME_SLIP_STATE[user_id]
+    purchase_state = PURCHASE_STATE[user_id]
 
     # ========================================================
     # FIRST MESSAGE GREETING — show leave balance once per session
@@ -512,38 +621,50 @@ async def chat(req: ChatRequest, Login: Optional[str] = Header(None)):
             }
 
     # ========================================================
+    # ROUTE NEW REQUESTS INTO A FLOW WHEN NO ACTIVE STATE EXISTS
+    # ========================================================
+
+    if not any([
+        pack_state.get("intent"),
+        leave_state.get("intent"),
+        ts_state.get("intent"),
+        purchase_state.get("intent"),
+    ]):
+        root_intent = resolve_intent(message)
+        if root_intent == "leave":
+            leave_state["intent"] = "apply"
+        elif root_intent == "time_slip":
+            ts_state["intent"] = "apply"
+        elif root_intent == "purchase":
+            purchase_state["intent"] = "create"
+
+    # ========================================================
     # CONTINUE ACTIVE LEAVE FLOW
     # ========================================================
 
     if leave_state["intent"] == "apply":
-        # 1. Handle Selection from SelectList
         is_selection = False
-        
+
         if "last_options" in leave_state:
             options = leave_state["last_options"]
             selected = None
-            
-            # Check 1: User typed a Number
-            # TLeaveDayType uses 0-based (0/1/2); all other fields use 1-based (1/2/3...)
+
             if message.isdigit():
                 if leave_state.get("awaiting_field") == "TLeaveDayType":
-                    idx = int(message)        # 0-indexed
+                    idx = int(message)
                 else:
-                    idx = int(message) - 1    # 1-indexed
+                    idx = int(message) - 1
                 if 0 <= idx < len(options):
                     selected = options[idx]
 
-            # Check 2: User typed the Label (e.g. "Sick Leave") — fuzzy match
             if not selected:
                 labels = [o["label"].lower() for o in options]
                 close = difflib.get_close_matches(message.lower(), labels, n=1, cutoff=0.7)
                 if close:
                     selected = next((o for o in options if o["label"].lower() == close[0]), None)
 
-            # APPLY SELECTION
             if selected:
                 target_field = leave_state.get("awaiting_field")
-                
                 if target_field == "LeaveType":
                     leave_state["slots"]["LeaveTypeId"] = str(selected["value"])
                     leave_state["slots"]["LeaveType"] = selected["label"]
@@ -553,20 +674,22 @@ async def chat(req: ChatRequest, Login: Optional[str] = Header(None)):
                 elif target_field == "TLeaveDayType":
                     leave_state["slots"]["TLeaveDayType"] = selected["value"]
                     leave_state["slots"]["TLeaveDayTypeCode"] = selected.get("code", "0")
-                
+
                 is_selection = True
                 leave_state.pop("last_options", None)
                 leave_state.pop("awaiting_field", None)
 
         if not is_selection:
-            # Check if the current message is the reason (not a date)
             has_date_pattern = bool(re.search(r"\d{1,2}[-/]\d{1,2}", message))
-            
-            if (leave_state["slots"].get("LeaveType") and 
-                leave_state["slots"].get("FromDate") and 
-                leave_state["slots"].get("ToDate") and 
-                not leave_state["slots"].get("Reason") and 
-                message and not has_date_pattern):
+
+            if (
+                leave_state["slots"].get("LeaveType")
+                and leave_state["slots"].get("FromDate")
+                and leave_state["slots"].get("ToDate")
+                and not leave_state["slots"].get("Reason")
+                and message
+                and not has_date_pattern
+            ):
                 leave_state["slots"]["Reason"] = message.strip()
             else:
                 ai = call_leave_chat(message)
@@ -575,10 +698,7 @@ async def chat(req: ChatRequest, Login: Optional[str] = Header(None)):
                     if v:
                         leave_state["slots"][k] = v
 
-        # Default employee name
         leave_state["slots"].setdefault("EmployeeName", login.get("UserName"))
-
-        # ---------------- REQUIRED FIELDS WITH SELECTLIST ----------------
 
         if not leave_state["slots"].get("LeaveType"):
             types = get_leave_types(login)
@@ -636,7 +756,6 @@ async def chat(req: ChatRequest, Login: Optional[str] = Header(None)):
                 "message": f"Please select the Day Type:\n{options_text}\n\nReply with the number of your choice."
             }
 
-        # ---------------- CALCULATE DAYS ----------------
         days = _calculate_days(
             leave_state["slots"]["FromDate"],
             leave_state["slots"]["ToDate"]
@@ -650,12 +769,11 @@ async def chat(req: ChatRequest, Login: Optional[str] = Header(None)):
 
         leave_state["slots"]["NumberOfDays"] = days
 
-        # ---------------- APPLY LEAVE ----------------
         result = apply_leave_flow(leave_state["slots"], login)
-        
+
         if result.get("status") == "success":
             LEAVE_STATE.pop(user_id, None)
-        
+
         return result
 
     # ========================================================
@@ -663,37 +781,28 @@ async def chat(req: ChatRequest, Login: Optional[str] = Header(None)):
     # ========================================================
 
     if ts_state["intent"] == "apply":
-        # 1. Handle Selection from SelectList (Time Slip Reasons)
         is_selection = False
-        
+
         if "last_options" in ts_state:
             options = ts_state["last_options"]
             selected = None
-            
-            # Check 1: User typed a Number (1, 2, 3...)
+
             if message.isdigit():
                 idx = int(message) - 1
                 if 0 <= idx < len(options):
                     selected = options[idx]
 
-            # Check 2: User typed the Label — fuzzy match
             if not selected:
                 labels = [o["label"].lower() for o in options]
                 close = difflib.get_close_matches(message.lower(), labels, n=1, cutoff=0.7)
                 if close:
                     selected = next((o for o in options if o["label"].lower() == close[0]), None)
 
-            # APPLY SELECTION
             if selected:
                 target_field = ts_state.get("awaiting_field")
                 if target_field == "TimeSlipReason":
-                    # We store the selected label as the reason name 
-                    # The client side will resolve ID based on Name or we pass ID if client supports it
-                    # But client currently resolves by matching Name again in apply_time_slip 
-                    # OR fallback to map_leave_reason. 
-                    # To be robust, we'll store the Label.
                     ts_state["slots"]["TimeSlipReason"] = selected["label"]
-                
+
                 is_selection = True
                 ts_state.pop("last_options", None)
                 ts_state.pop("awaiting_field", None)
@@ -702,13 +811,11 @@ async def chat(req: ChatRequest, Login: Optional[str] = Header(None)):
             awaiting = ts_state.get("awaiting_field")
 
             if awaiting == "TimeSlipDate":
-                # User is directly answering the date question — parse and store it
                 from utils.date_parser import parse_date
                 parsed = parse_date(message.strip())
                 if parsed:
                     ts_state["slots"]["TimeSlipDate"] = parsed
                     ts_state.pop("awaiting_field", None)
-                # If parse failed, leave awaiting_field set so we ask again below
 
             elif awaiting == "FromTime":
                 extracted = _extract_time(message)
@@ -723,229 +830,252 @@ async def chat(req: ChatRequest, Login: Optional[str] = Header(None)):
                     ts_state.pop("awaiting_field", None)
 
             else:
-                # No specific field awaited — try LLM extraction for multi-slot messages
-                has_time_pattern = bool(_extract_time(message))
-                if (ts_state["slots"].get("TimeSlipDate") and
-                    ts_state["slots"].get("FromTime") and
-                    ts_state["slots"].get("ToTime") and
-                    not ts_state["slots"].get("TimeSlipReason") and
-                    message and not has_time_pattern):
-                    ts_state["slots"]["TimeSlipReason"] = message.strip()
-                else:
-                    ai = call_time_slip_chat(message)
-                    slots = normalize_time_slip_slots(ai["action"]["slots"])
-                    ts_state["slots"].update({k: v for k, v in slots.items() if v})
-
-        ts_state["slots"]["EmployeeId"] = login.get("UserId")
-        ts_state["slots"]["EmployeeName"] = login.get("UserName")
-        ts_state["slots"]["EmployeeCode"] = login.get("UserCode")
+                ai = call_time_slip_chat(message)
+                slots = normalize_time_slip_slots(ai["action"]["slots"])
+                for k, v in slots.items():
+                    if v:
+                        ts_state["slots"][k] = v
 
         if not ts_state["slots"].get("TimeSlipDate"):
             ts_state["awaiting_field"] = "TimeSlipDate"
-            return {"status": "success", "message": "Please provide Time Slip Date."}
+            return {
+                "status": "success",
+                "message": "Please provide the Time Slip date (for example, 02-01-2024)."
+            }
 
         if not ts_state["slots"].get("FromTime"):
             ts_state["awaiting_field"] = "FromTime"
-            warning = check_date_warning(ts_state["slots"].get("TimeSlipDate", ""))
-            prefix = f"{warning}\n\n" if warning else ""
-            return {"status": "success", "message": f"{prefix}Please provide From Time (HH:MM)."}
+            return {
+                "status": "success",
+                "message": "Please provide From Time (for example, 09:00)."
+            }
 
         if not ts_state["slots"].get("ToTime"):
             ts_state["awaiting_field"] = "ToTime"
-            return {"status": "success", "message": "Please provide To Time (HH:MM)."}
+            return {
+                "status": "success",
+                "message": "Please provide To Time (for example, 11:00)."
+            }
 
         if not ts_state["slots"].get("TimeSlipReason"):
             reasons = get_time_slip_reasons(login)
             if not reasons:
                 return {
                     "status": "error",
-                    "message": "Unable to fetch time slip reasons."
+                    "message": "Unable to fetch permission reasons at the moment. Please try again later."
                 }
-            options = [{"label": r.get("Name") or r.get("ReasonName"), "value": r.get("Id") or r.get("ReasonId")} for r in reasons]
+            options = [{
+                "label": r.get("Name") or r.get("TLeaveReasonName"),
+                "value": r.get("Id") or r.get("TLeaveReasonId")
+            } for r in reasons]
             ts_state["last_options"] = options
             ts_state["awaiting_field"] = "TimeSlipReason"
             options_text = "\n".join(f"{i+1}. {o['label']}" for i, o in enumerate(options))
-            
             return {
                 "status": "success",
-                "message": f"Please select the reason for the Time Slip from the options below:\n{options_text}\n\nReply with the number of your choice."
+                "message": f"Please select the permission reason from the options below:\n{options_text}\n\nReply with the number of your choice."
             }
 
         result = apply_time_slip_flow(ts_state["slots"], login)
+
         if result.get("status") == "success":
             TIME_SLIP_STATE.pop(user_id, None)
+
         return result
 
     # ========================================================
-    # CONTINUE ACTIVE PACK FLOW
+    # CONTINUE ACTIVE PURCHASE FLOW
     # ========================================================
 
-    if pack_state["intent"] == "create":
-        # 1. Attempt to extract slots using AI
-        ai = call_ollama_chat(message)
-        slots = normalize_slots(ai["action"]["slots"])
-        pack_state["slots"].update({k: v for k, v in slots.items() if v})
+    if purchase_state["intent"] == "create":
+        is_selection = False
 
-        # 2. Check and ask for Pack Name
-        if not pack_state["slots"].get("PackName"):
-            # If we were explicitly waiting for Name, accept this message as the name
-            if pack_state.get("awaiting") == "PackName":
-                pack_state["slots"]["PackName"] = message.strip()
-                pack_state["awaiting"] = None # Reset
-            else:
-                pack_state["awaiting"] = "PackName"
-                return {"status": "success", "message": "Please provide Pack Name."}
+        if "last_options" in purchase_state:
+            options = purchase_state["last_options"]
+            selected = None
 
-        # 3. Check and ask for Pack Code
-        if pack_state["slots"].get("PackName") and not pack_state["slots"].get("PackCode"):
-            # If we were explicitly waiting for Code, accept this message as the code
-            if pack_state.get("awaiting") == "PackCode":
-                pack_state["slots"]["PackCode"] = message.strip()
-                pack_state["awaiting"] = None # Reset
-            else:
-                pack_state["awaiting"] = "PackCode"
-                return {"status": "success", "message": "Please provide Pack Code."}
+            if message.isdigit():
+                idx = int(message) - 1
+                if 0 <= idx < len(options):
+                    selected = options[idx]
 
-        # 4. Final Execution - Only if both exist
-        if pack_state["slots"].get("PackName") and pack_state["slots"].get("PackCode"):
-            result = create_pack(pack_state["slots"], login)
-            if result.get("status") == "success":
-                PACK_STATE.pop(user_id, None)
-            return result
-        
-        # Fallback safety (should not happen with logic above)
-        return {"status": "success", "message": "Please provide Pack Code."}
+            if not selected:
+                labels = [o["label"].lower() for o in options]
+                close = difflib.get_close_matches(message.lower(), labels, n=1, cutoff=0.7)
+                if close:
+                    selected = next((o for o in options if o["label"].lower() == close[0]), None)
 
+            if selected:
+                target_field = purchase_state.get("awaiting_field")
+                record = selected.get("record", {})
 
-    # ========================================================
-    # NEW INTENT RESOLUTION
-    # ========================================================
+                if target_field == "Party":
+                    purchase_state["slots"]["PartyName"] = selected["label"]
+                    purchase_state["slots"]["PartyId"] = str(_first_non_empty(record, "Id", "PartyId", default=""))
+                    purchase_state["slots"]["PartyCode"] = str(_first_non_empty(record, "Code", "PartyCode", default=""))
+                    purchase_state["slots"]["PartyBranchId"] = str(_first_non_empty(record, "PartyBranchId", default="-1"))
+                elif target_field == "Item":
+                    purchase_state["slots"]["ItemName"] = selected["label"]
+                    purchase_state["slots"]["ItemId"] = str(_first_non_empty(record, "Id", "ItemId", default=""))
+                    purchase_state["slots"]["ItemCode"] = str(_first_non_empty(record, "Code", "ItemCode", default=""))
+                elif target_field == "Store":
+                    purchase_state["slots"]["StoreName"] = selected["label"]
+                    store_id = str(_first_non_empty(record, "Id", "StoreId", default=""))
+                    if store_id:
+                        purchase_state["slots"]["StoreId"] = store_id
+                        purchase_state["slots"]["FromStoreId"] = store_id
 
-    intent = resolve_intent(message)
+                is_selection = True
+                purchase_state.pop("last_options", None)
+                purchase_state.pop("awaiting_field", None)
 
-    if intent == "leave":
-        leave_state["intent"] = "apply"
-        
-        # ---------------- EXTRACT SLOTS FROM INITIAL MESSAGE ----------------
-        # User said "Apply leave tomorrow", so we should extract "tomorrow"
-        # and not ask for it again.
-        ai = call_leave_chat(message)
-        slots = normalize_leave_slots(ai["action"]["slots"])
-        
-        # Only update slots that have values (don't overwrite with empty)
-        # But since state is new, we can just update.
-        for k, v in slots.items():
-            if v:
-                leave_state["slots"][k] = v
+        if not is_selection:
+            ai = call_purchase_chat(message)
+            slots = normalize_purchase_slots(ai.get("action", {}).get("slots", {}))
+            for k, v in slots.items():
+                if v not in (None, ""):
+                    purchase_state["slots"][k] = v
 
-        # Fetch types immediately
-        types = get_leave_types(login)
-        if not types:
+        if purchase_state["slots"].get("PartyName") and not purchase_state["slots"].get("PartyId"):
+            party = _best_match_record(
+                get_parties(login),
+                purchase_state["slots"]["PartyName"],
+                name_keys=("Name", "PartyName"),
+                code_keys=("Code", "PartyCode"),
+                id_keys=("Id", "PartyId")
+            )
+            if party:
+                purchase_state["slots"]["PartyName"] = str(_first_non_empty(party, "Name", "PartyName", default="")).strip()
+                purchase_state["slots"]["PartyId"] = str(_first_non_empty(party, "Id", "PartyId", default=""))
+                purchase_state["slots"]["PartyCode"] = str(_first_non_empty(party, "Code", "PartyCode", default=""))
+                purchase_state["slots"]["PartyBranchId"] = str(_first_non_empty(party, "PartyBranchId", default="-1"))
+
+        if purchase_state["slots"].get("ItemName") and not purchase_state["slots"].get("ItemId"):
+            item = _best_match_record(
+                get_items(login),
+                purchase_state["slots"]["ItemName"],
+                name_keys=("Name", "ItemName"),
+                code_keys=("Code", "ItemCode"),
+                id_keys=("Id", "ItemId")
+            )
+            if item:
+                purchase_state["slots"]["ItemName"] = str(_first_non_empty(item, "Name", "ItemName", default="")).strip()
+                purchase_state["slots"]["ItemId"] = str(_first_non_empty(item, "Id", "ItemId", default=""))
+                purchase_state["slots"]["ItemCode"] = str(_first_non_empty(item, "Code", "ItemCode", default=""))
+
+        if purchase_state["slots"].get("StoreName") and not purchase_state["slots"].get("StoreId"):
+            store = _best_match_record(
+                get_stores(login),
+                purchase_state["slots"]["StoreName"],
+                name_keys=("Name", "StoreName"),
+                code_keys=("Code", "StoreCode"),
+                id_keys=("Id", "StoreId")
+            )
+            if store:
+                purchase_state["slots"]["StoreName"] = str(_first_non_empty(store, "Name", "StoreName", default="")).strip()
+                store_id = str(_first_non_empty(store, "Id", "StoreId", default=""))
+                if store_id:
+                    purchase_state["slots"]["StoreId"] = store_id
+                    purchase_state["slots"]["FromStoreId"] = store_id
+
+        if not purchase_state["slots"].get("PartyId"):
+            parties = get_parties(login)
+            if not parties:
+                return {
+                    "status": "error",
+                    "message": "Unable to fetch purchase parties at the moment. Please try again later."
+                }
+            options = _build_options(
+                parties,
+                label_keys=("Name", "PartyName"),
+                value_keys=("Id", "PartyId"),
+                code_keys=("Code", "PartyCode")
+            )
+            purchase_state["last_options"] = options
+            purchase_state["awaiting_field"] = "Party"
+            options_text = "\n".join(f"{i+1}. {o['label']}" for i, o in enumerate(options))
+            return {
+                "status": "success",
+                "message": f"Please select the party from the options below:\n{options_text}\n\nReply with the number of your choice."
+            }
+
+        if not purchase_state["slots"].get("ItemId"):
+            items = get_items(login)
+            if not items:
+                return {
+                    "status": "error",
+                    "message": "Unable to fetch purchase items at the moment. Please try again later."
+                }
+            options = _build_options(
+                items,
+                label_keys=("Name", "ItemName"),
+                value_keys=("Id", "ItemId"),
+                code_keys=("Code", "ItemCode")
+            )
+            purchase_state["last_options"] = options
+            purchase_state["awaiting_field"] = "Item"
+            options_text = "\n".join(f"{i+1}. {o['label']}" for i, o in enumerate(options))
+            return {
+                "status": "success",
+                "message": f"Please select the item from the options below:\n{options_text}\n\nReply with the number of your choice."
+            }
+
+        if not purchase_state["slots"].get("StoreId"):
+            stores = get_stores(login)
+            if not stores:
+                return {
+                    "status": "error",
+                    "message": "Unable to fetch purchase stores at the moment. Please try again later."
+                }
+            options = _build_options(
+                stores,
+                label_keys=("Name", "StoreName"),
+                value_keys=("Id", "StoreId"),
+                code_keys=("Code", "StoreCode")
+            )
+            purchase_state["last_options"] = options
+            purchase_state["awaiting_field"] = "Store"
+            options_text = "\n".join(f"{i+1}. {o['label']}" for i, o in enumerate(options))
+            return {
+                "status": "success",
+                "message": f"Please select the store from the options below:\n{options_text}\n\nReply with the number of your choice."
+            }
+
+        if not purchase_state["slots"].get("Quantity"):
+            return {
+                "status": "success",
+                "message": "Please provide the purchase quantity."
+            }
+
+        if not purchase_state["slots"].get("Rate"):
+            return {
+                "status": "success",
+                "message": "Please provide the purchase rate."
+            }
+
+        try:
+            float(purchase_state["slots"].get("Quantity", 0))
+            float(purchase_state["slots"].get("Rate", 0))
+        except Exception:
+            return {
+                "status": "success",
+                "message": "Quantity and Rate must be numeric. Please provide valid values."
+            }
+
+        try:
+            result = create_purchase_order(purchase_state["slots"], login)
+            PURCHASE_STATE.pop(user_id, None)
+            return {
+                "status": "success",
+                "message": "Purchase order created successfully."
+            }
+        except Exception as e:
             return {
                 "status": "error",
-                "message": "Unable to fetch leave types from the service."
+                "message": f"Failed to create purchase order: {e}"
             }
-        
-        options = [{"label": t.get("Name") or t.get("TLeaveTypeName"), "value": t.get("Id") or t.get("TLeaveTypeId")} for t in types]
-        
-        leave_state["last_options"] = options
-        leave_state["awaiting_field"] = "LeaveType"
-        
-        options_text = "\n".join(f"{i+1}. {o['label']}" for i, o in enumerate(options))
-        
-        # If we already have dates, we might want to acknowledge them?
-        # But the prompt is just "Select Leave Type".
-        # The flow loop will pick up the filled slots logic next turn.
-        # Check if we need to prompt for leave type? 
-        # The prompt is standard.
-        
-        return {
-            "status": "success",
-            "message": f"Sure 👍 Please select Leave Type from the options below:\n{options_text}\n\nReply with the number of your choice."
-        }
-
-    if intent == "time_slip":
-        ts_state["intent"] = "apply"
-        
-        # ---------------- EXTRACT SLOTS FROM INITIAL MESSAGE ----------------
-        ai = call_time_slip_chat(message)
-        slots = normalize_time_slip_slots(ai["action"]["slots"])
-        
-        for k, v in slots.items():
-            if v:
-                ts_state["slots"][k] = v
-        
-        # If date is already captured, we shouldn't ask "Please provide Time Slip Date."
-        # The loop logic handles this, but here we are returning a specific first response.
-        # We need to check if date is missing.
-        
-        if not ts_state["slots"].get("TimeSlipDate"):
-            ts_state["awaiting_field"] = "TimeSlipDate"
-            return {"status": "success", "message": "Sure 👍 Please provide Time Slip Date."}
-        
-        # If date IS present, we let the loop handle the next missing field (FromTime, etc.)
-        # We can return a generic "Processing..." that client ignores? 
-        # Or better: We call the LOOP logic recursively or fall through?
-        # Since this is an API endpoint returning a response, we must calculate the Next Step.
-        
-        # Re-evaluating the flow:
-        # If I return here, I must return the Correct Next Question.
-        # I can copy-paste the logic or refactor. 
-        # Simplest: copy logic for determining next question.
-        
-        if not ts_state["slots"].get("FromTime"):
-            return {"status": "success", "message": "Please provide From Time (HH:MM)."}
-            
-        if not ts_state["slots"].get("ToTime"):
-            return {"status": "success", "message": "Please provide To Time (HH:MM)."}
-            
-        if not ts_state["slots"].get("TimeSlipReason"):
-            reasons = get_time_slip_reasons(login)
-            if not reasons:
-                return {
-                     "status": "error",
-                     "message": "Unable to fetch time slip reasons."
-                }
-            options = [{"label": r.get("Name") or r.get("ReasonName"), "value": r.get("Id") or r.get("ReasonId")} for r in reasons]
-            ts_state["last_options"] = options
-            ts_state["awaiting_field"] = "TimeSlipReason"
-            options_text = "\n".join(f"{i+1}. {o['label']}" for i, o in enumerate(options))
-            
-            return {
-                "status": "success",
-                "message": f"Please select the reason for the Time Slip from the options below:\n{options_text}\n\nReply with the number of your choice."
-            }
-            
-        # If everything is full (rare for initial message?), we could apply immediately?
-        # "Time slip for today 10 to 11 personal"
-        result = apply_time_slip_flow(ts_state["slots"], login)
-        if result.get("status") == "success":
-            TIME_SLIP_STATE.pop(user_id, None)
-        return result
-
-
-    # ========================================================
-    # PACK TRIGGER
-    # ========================================================
-
-    ai = call_ollama_chat(message)
-    if ai["action"]["intent"] == "create":
-        pack_state["intent"] = "create"
-        pack_state["awaiting"] = "PackName"  # Set initial expectation
-        return {"status": "success", "message": "Sure 👍 Please provide Pack Name."}
 
     return {
         "status": "success",
-        "message": "Hello 👋 I can help you apply Leave, submit Time Slip, or create a Pack."
+        "message": "I can help you apply Leave, submit a Time Slip, or create a Purchase Order."
     }
-
-
-# ============================================================
-# RUN
-# ============================================================
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
-
-    

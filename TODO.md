@@ -1,12 +1,22 @@
-# TODO: Fix Leave Type Options Not Showing
+# Purchase Order Implementation TODO
 
-## Completed Steps
-- [x] Update payload in get_leave_types to remove restrictive LeaveType filter
-- [x] Add debug prints to log payload, API response, and parsed leave types
-- [x] Change API endpoint from Leave.svc to LeaveType.svc
-- [x] Change API endpoint from LeaveType.svc to TLeaveType.svc
+## Step 1: Create `backend/purchase_bot/` module
+- [x] `__init__.py`
+- [x] `purchase_prompt.py` — LLM system prompt for PO intent & slots
+- [x] `purchase_agent.py` — Intent resolver, regex fallback, slot normalization
+- [x] `purchase_client.py` — API client: get_parties, get_items, create_purchase_order
 
-## Next Steps
-- [ ] Run the application and test the leave apply flow to verify options appear
-- [ ] Check debug logs for any issues with API response or parsing
-- [ ] If options still don't show, investigate further (e.g., API endpoint, login credentials)
+## Step 2: Update shared config files
+- [x] `backend/biztransactionid/__init__.py` — Add `PURCHASE_TRANSACTION_CLASS_ID`
+- [x] `backend/criteria.json` — Add `PARTY_CRITERIA`, `ITEM_CRITERIA`, `STORE_CRITERIA`
+
+## Step 3: Update `backend/main.py`
+- [x] Add imports for purchase_bot
+- [x] Add `PURCHASE_STATE` and TTL cleanup
+- [x] Extend `resolve_intent()` with purchase signals
+- [x] Add active purchase flow handler
+- [x] Add new intent trigger for "purchase"
+
+## Step 4: Test & Validate
+- [ ] Run server
+- [ ] Test PO creation flow via API

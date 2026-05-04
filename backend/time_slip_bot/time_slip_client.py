@@ -312,10 +312,10 @@ def direct_url(path: str, login: Dict[str, Any] = None) -> str:
 # APPLY TIME SLIP (✅ FIXED)
 # ============================================================
 
-def apply_time_slip(slots: Dict[str, Any], login: Dict[str, Any]) -> bool:
+def apply_time_slip(slots: Dict[str, Any], login: Dict[str, Any]) -> Dict[str, Any]:
     """
-    ERP TimeSlip service does NOT return a response body.
-    Success = HTTP 200 / 204 with no exception.
+    Save a time slip and preserve both the raw response body and the extracted
+    permission number for the caller.
     """
 
     # ---------------- DATE ----------------
@@ -482,7 +482,11 @@ def apply_time_slip(slots: Dict[str, Any], login: Dict[str, Any]) -> bool:
         except Exception:
             pass
 
-        return ts_number
+        return {
+            "permission_number": ts_number,
+            "body": response_json if response.status_code != 204 else None,
+            "status_code": response.status_code
+        }
 
     except Exception as e:
         logger.error(f"❌ Failed to save time slip: {e}")
