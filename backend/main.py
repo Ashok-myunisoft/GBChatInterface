@@ -440,6 +440,152 @@ def _format_service_body(body) -> str:
         return str(body)
 
 
+def _parse_attendance_records(payload):
+    """
+    Extract attendance rows from the daily attendance service response.
+    The service may return:
+    - a list directly
+    - a dict with Body containing a JSON string
+    - a dict with Body already parsed into a list
+    - a dict with ResponseObject/Data
+    """
+    if payload in (None, "", [], {}):
+        return []
+
+    data = payload
+
+    if isinstance(data, dict):
+        if "ResponseObject" in data and data["ResponseObject"] not in (None, "", [], {}):
+            data = data["ResponseObject"]
+        elif "Data" in data and data["Data"] not in (None, "", [], {}):
+            data = data["Data"]
+        elif "Body" in data:
+            data = data["Body"]
+
+    if isinstance(data, str):
+        text = data.strip()
+        if not text:
+            return []
+        try:
+            data = json.loads(text)
+        except Exception:
+            return []
+
+    if isinstance(data, dict):
+        if "ResponseObject" in data and data["ResponseObject"] not in (None, "", [], {}):
+            data = data["ResponseObject"]
+        elif "Data" in data and data["Data"] not in (None, "", [], {}):
+            data = data["Data"]
+
+    return data if isinstance(data, list) else []
+
+
+def _format_attendance_date(value) -> str:
+    if value in (None, "", 0):
+        return ""
+
+    text = str(value).strip()
+    if not text:
+        return ""
+
+    m = re.search(r"/Date\((\-?\d+)\)/", text)
+    if m:
+        try:
+            ts_ms = int(m.group(1))
+            if ts_ms < 0:
+                return ""
+            return datetime.utcfromtimestamp(ts_ms / 1000).strftime("%d-%m-%Y")
+        except Exception:
+            pass
+
+    try:
+        from utils.date_parser import parse_date
+        parsed = parse_date(text)
+        if parsed:
+            return parsed
+    except Exception:
+        pass
+
+    return text
+
+
+def _format_minutes_as_hhmm(value) -> str:
+    if value in (None, "", 0, "0"):
+        return ""
+    try:
+        minutes = int(float(value))
+        hours = minutes // 60
+        mins = minutes % 60
+        return f"{hours:02d}:{mins:02d}"
+    except Exception:
+        return str(value).strip()
+
+
+def _format_attendance_response(payload) -> str:
+    records = _parse_attendance_records(payload)
+    if not records:
+        return ""
+
+    lines = [f"Daily attendance for {len(records)} day(s):"]
+    for idx, record in enumerate(records, start=1):
+        if not isinstance(record, dict):
+            continue
+
+        date_text = _format_attendance_date(
+            record.get("DailyAttendanceAttendanceDate")
+            or record.get("AttendanceDate")
+            or record.get("Date")
+        )
+        day_type = (
+            record.get("TextDayType")
+            or record.get("DailyAttendanceDayType")
+            or ""
+        )
+        in_time = (
+            record.get("DailyAttendanceCalInTime")
+            or _format_minutes_as_hhmm(record.get("DailyAttendanceInTime"))
+            or ""
+        )
+        out_time = (
+            record.get("DailyAttendanceCalOutTime")
+            or _format_minutes_as_hhmm(record.get("DailyAttendanceOutTime"))
+            or ""
+        )
+        worked = (
+            record.get("DailyAttendanceCalWorkedHours")
+            or _format_minutes_as_hhmm(record.get("DailyAttendanceWorkedHours"))
+            or ""
+        )
+        remarks = (record.get("DailyAttendanceRemarks") or "").strip()
+        work_type = (record.get("WorkTypeName") or "").strip()
+        shift = (record.get("ShiftDescription") or "").strip()
+
+        parts = []
+        if date_text:
+            parts.append(date_text)
+        if day_type not in (None, ""):
+            parts.append(f"Type {day_type}")
+        if in_time:
+            parts.append(f"In {in_time}")
+        if out_time:
+            parts.append(f"Out {out_time}")
+        if worked:
+            parts.append(f"Worked {worked}")
+        if work_type:
+            parts.append(f"Work {work_type}")
+        if shift:
+            parts.append(f"Shift {shift}")
+        if remarks:
+            parts.append(f"Remarks {remarks}")
+
+        if not parts:
+            parts.append("No attendance details available")
+
+        lines.append(f"{idx}. " + " | ".join(parts))
+
+    return "\n".join(lines)
+
+
 def apply_leave_flow(slots, login):
     try:
         result = apply_leave(slots, login)
@@ -1036,6 +1182,15 @@ async def chat(req: ChatRequest, Login: Optional[str] = Header(None)):
                 return {
                     "status": "error",
                     "message": f"Failed to fetch daily attendance: {error_text}"
+                }
+
+            attendance_body = result.get("body") if isinstance(result, dict) else result
+            formatted_attendance = _format_attendance_response(attendance_body)
+            if formatted_attendance:
+                ATTENDANCE_STATE.pop(user_id, None)
+                return {
+                    "status": "success",
+                    "message": formatted_attendance
                 }
 
             decoded_body = _extract_decoded_service_body(result)
