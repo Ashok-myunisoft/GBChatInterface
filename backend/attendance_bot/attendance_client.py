@@ -349,13 +349,17 @@ def get_daily_attendance(login: Dict[str, Any], selected_payperiod: Dict[str, An
 
         candidates = _build_attendance_date_candidates(selected_payperiod)
         last_error = None
+        logger.info(f"📋 Attendance date candidates: {candidates}")
 
         for date_pair in candidates:
             prepared = _prepare_payload(payload, login, date_pair)
+            logger.info("📤 Attendance request payload: %s", json.dumps(prepared, indent=2, ensure_ascii=False, default=str))
             response = session.post(url, json=prepared, headers=headers, timeout=60)
+            logger.info("📥 Attendance response status: %s", response.status_code)
 
             if response.status_code == 200:
                 response_json = response.json()
+                logger.info("📥 Attendance response JSON: %s", json.dumps(response_json, indent=2, ensure_ascii=False, default=str))
                 parsed_body = parse_api_response(response_json)
                 return {
                     "body": parsed_body if parsed_body not in (None, "", [], {}) else response_json,
@@ -370,11 +374,16 @@ def get_daily_attendance(login: Dict[str, Any], selected_payperiod: Dict[str, An
                 response_json = {}
 
             parsed_error = parse_api_response(response_json) if isinstance(response_json, dict) else []
+            response_text = response.text if response.text else ""
+            logger.warning("⚠️ Attendance response text: %s", response_text)
+            logger.warning("⚠️ Attendance response JSON: %s", json.dumps(response_json, indent=2, ensure_ascii=False, default=str) if response_json else "{}")
             last_error = {
                 "status_code": response.status_code,
                 "body": response_json if response_json else response.text,
+                "response_text": response_text,
                 "used_dates": date_pair,
                 "parsed_error": parsed_error,
+                "request_payload": prepared,
             }
 
             error_text = json.dumps(response_json, default=str) if response_json else response.text

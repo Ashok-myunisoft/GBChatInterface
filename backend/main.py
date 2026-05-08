@@ -1022,6 +1022,15 @@ async def chat(req: ChatRequest, Login: Optional[str] = Header(None)):
                     error_text = json.dumps(error_body, indent=2, ensure_ascii=False, default=str)
                 else:
                     error_text = str(error_body)
+                used_dates = result.get("used_dates") or {}
+                request_payload = result.get("request_payload")
+                debug_bits = []
+                if used_dates:
+                    debug_bits.append(f"used_dates={json.dumps(used_dates, default=str)}")
+                if request_payload:
+                    debug_bits.append(f"request_payload={json.dumps(request_payload, indent=2, ensure_ascii=False, default=str)}")
+                if debug_bits:
+                    error_text = f"{error_text}\n\n" + "\n".join(debug_bits)
                 if not error_text.strip():
                     error_text = "Failed to fetch daily attendance."
                 return {
