@@ -521,13 +521,24 @@ def _format_minutes_as_hhmm(value) -> str:
         return str(value).strip()
 
 
+def _escape_md_cell(value) -> str:
+    if value in (None, ""):
+        return ""
+    text = str(value).replace("\n", " ").replace("\r", " ").strip()
+    return text.replace("|", "\\|")
+
+
 def _format_attendance_response(payload) -> str:
     records = _parse_attendance_records(payload)
     if not records:
         return ""
 
-    lines = [f"Daily attendance for {len(records)} day(s):"]
-    for idx, record in enumerate(records, start=1):
+    lines = [f"Daily attendance for {len(records)} day(s):", ""]
+    lines.append("| Date | Type | In | Out | Worked | Work Type | Shift | Remarks |")
+    lines.append("| --- | --- | --- | --- | --- | --- | --- | --- |")
+
+    row_count = 0
+    for record in records:
         if not isinstance(record, dict):
             continue
 
@@ -581,7 +592,24 @@ def _format_attendance_response(payload) -> str:
         if not parts:
             parts.append("No attendance details available")
 
-        lines.append(f"{idx}. " + " | ".join(parts))
+        lines.append(
+            "| "
+            + " | ".join([
+                _escape_md_cell(date_text),
+                _escape_md_cell(day_type),
+                _escape_md_cell(in_time),
+                _escape_md_cell(out_time),
+                _escape_md_cell(worked),
+                _escape_md_cell(work_type),
+                _escape_md_cell(shift),
+                _escape_md_cell(remarks),
+            ])
+            + " |"
+        )
+        row_count += 1
+
+    if row_count == 0:
+        return ""
 
     return "\n".join(lines)
 
