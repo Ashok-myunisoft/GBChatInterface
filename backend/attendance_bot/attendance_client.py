@@ -3,6 +3,8 @@ import copy
 import gzip
 import json
 import logging
+import re
+from datetime import datetime
 from typing import Any, Dict, List
 
 import requests
@@ -57,6 +59,43 @@ def _first_non_empty(record: Dict[str, Any], *keys, default=""):
         if value not in (None, ""):
             return value
     return default
+
+
+def _to_gb_date(value: Any) -> str:
+    """
+    Convert a date-like value into GoodBooks /Date(ms)/ format.
+    Returns an empty string if the value cannot be parsed.
+    """
+    if value in (None, ""):
+        return ""
+
+    text = str(value).strip()
+    if not text:
+        return ""
+
+    if re.match(r"^/Date\(\d+\)/$", text):
+        return text
+
+    match = re.search(r"\d+", text)
+    if text.startswith("/Date(") and match:
+        return f"/Date({match.group(0)})/"
+
+    for fmt in (
+        "%d-%m-%Y",
+        "%d/%m/%Y",
+        "%Y-%m-%d",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S.%f",
+        "%d-%m-%YT%H:%M:%S",
+        "%d/%m/%YT%H:%M:%S",
+    ):
+        try:
+            dt = datetime.strptime(text, fmt)
+            return f"/Date({int(dt.timestamp() * 1000)})/"
+        except ValueError:
+            continue
+
+    return ""
 
 
 def clean_section_criteria(section_list: List[Dict]) -> List[Dict]:
@@ -191,6 +230,27 @@ def normalize_payperiod_record(record: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(record, dict):
         return {"id": "", "name": "", "fromDate": "", "toDate": "", "record": {}}
 
+    from_date_raw = _first_non_empty(
+        record,
+        "FromDate",
+        "PeriodFromDate",
+        "PeriodFrom",
+        "StartDate",
+        "Start",
+        "From",
+        default=""
+    )
+    to_date_raw = _first_non_empty(
+        record,
+        "ToDate",
+        "PeriodToDate",
+        "PeriodTo",
+        "EndDate",
+        "End",
+        "To",
+        default=""
+    )
+
     return {
         "id": _first_non_empty(record, "Id", "PayPeriodId", "PeriodId", "Period.Id", default=""),
         "name": _first_non_empty(
@@ -204,26 +264,10 @@ def normalize_payperiod_record(record: Dict[str, Any]) -> Dict[str, Any]:
             "Period.DisplayName",
             default=""
         ),
-        "fromDate": _first_non_empty(
-            record,
-            "FromDate",
-            "PeriodFromDate",
-            "PeriodFrom",
-            "StartDate",
-            "Start",
-            "From",
-            default=""
-        ),
-        "toDate": _first_non_empty(
-            record,
-            "ToDate",
-            "PeriodToDate",
-            "PeriodTo",
-            "EndDate",
-            "End",
-            "To",
-            default=""
-        ),
+        "fromDate": _to_gb_date(from_date_raw) or from_date_raw,
+        "toDate": _to_gb_date(to_date_raw) or to_date_raw,
+        "fromDateRaw": from_date_raw,
+        "toDateRaw": to_date_raw,
         "record": record,
     }
 
@@ -243,8 +287,10 @@ def get_daily_attendance(login: Dict[str, Any], selected_payperiod: Dict[str, An
         response = session.post(url, json=prepared, headers=headers, timeout=60)
         response.raise_for_status()
         response_json = response.json()
+        parsed_body = parse_api_response(response_json)
         return {
-            "body": response_json,
+            "body": parsed_body if parsed_body not in (None, "", [], {}) else response_json,
+            "raw_body": response_json,
             "status_code": response.status_code
         }
     except Exception as e:

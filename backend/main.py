@@ -407,17 +407,25 @@ def _extract_decoded_service_body(payload):
     if isinstance(payload, dict) and "body" in payload:
         candidate = payload.get("body")
 
+    if isinstance(candidate, list):
+        return candidate
+    if isinstance(candidate, str):
+        text = candidate.strip()
+        return text if text else None
     if not isinstance(candidate, dict) or not candidate:
-        return None
+        return candidate if candidate not in (None, "", [], {}) else None
 
     try:
         from leave_bot.leave_client import parse_api_response
-        decoded = parse_api_response(candidate)
-        if decoded in (None, "", [], {}):
-            return None
-        return decoded
+        if any(key in candidate for key in ("contents", "Body", "ResponseObject", "Data")):
+            decoded = parse_api_response(candidate)
+            if decoded in (None, "", [], {}):
+                return None
+            return decoded
+
+        return candidate
     except Exception:
-        return None
+        return candidate
 
 
 def _format_service_body(body) -> str:
