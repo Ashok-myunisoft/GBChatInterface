@@ -37,6 +37,14 @@ from time_slip_bot.time_slip_client import (
     get_time_slip_balance
 )
 
+# ---------------- ATTENDANCE ----------------
+from attendance_bot.attendance_agent import call_attendance_chat, normalize_attendance_slots
+from attendance_bot.attendance_client import (
+    get_pay_periods,
+    get_daily_attendance,
+    normalize_payperiod_record
+)
+
 # ---------------- PURCHASE ORDER ----------------
 from purchase_bot.purchase_agent import call_purchase_chat, normalize_purchase_slots
 from purchase_bot.purchase_client import create_purchase_order, get_parties, get_items, get_stores
@@ -83,6 +91,7 @@ class ChatRequest(BaseModel):
 PACK_STATE = {}
 LEAVE_STATE = {}
 TIME_SLIP_STATE = {}
+ATTENDANCE_STATE = {}
 PURCHASE_STATE = {}
 GREETED_USERS: set = set()
 
@@ -106,6 +115,7 @@ def _cleanup_expired():
         PACK_STATE.pop(uid, None)
         LEAVE_STATE.pop(uid, None)
         TIME_SLIP_STATE.pop(uid, None)
+        ATTENDANCE_STATE.pop(uid, None)
         PURCHASE_STATE.pop(uid, None)
         _STATE_TS.pop(uid, None)
         GREETED_USERS.discard(uid)
@@ -276,6 +286,10 @@ def _format_permission_balance_response(records: list) -> str:
     return "\n".join(lines)
 
 
+def _extract_selected_payperiod(record: dict) -> dict:
+    return normalize_payperiod_record(record)
+
+
 # ============================================================
 # INTENT RESOLUTION
 # ============================================================
@@ -291,6 +305,7 @@ def resolve_intent(message: str) -> str:
 
     leave_score = 0
     ts_score = 0
+    attendance_score = 0
 
     # -------- LEAVE SIGNALS --------
     if "leave" in msg or _fuzzy_in(words, "leave"):
@@ -312,6 +327,10 @@ def resolve_intent(message: str) -> str:
     if "today" in msg:
         ts_score += 1
 
+    # -------- ATTENDANCE SIGNALS --------
+    if any(k in msg for k in ["attendance", "daily attendance", "check in", "check-in", "punch"]):
+        attendance_score += 3
+
     # -------- PURCHASE SIGNALS --------
     purchase_score = 0
     if any(k in msg for k in ["purchase", "po", "purchase order", "buy", "procure"]):
@@ -323,6 +342,8 @@ def resolve_intent(message: str) -> str:
         return "leave"
     if ts_score > leave_score and ts_score > purchase_score:
         return "time_slip"
+    if attendance_score > leave_score and attendance_score > ts_score and attendance_score > purchase_score:
+        return "attendance"
     if purchase_score > leave_score and purchase_score > ts_score:
         return "purchase"
 
@@ -558,11 +579,13 @@ async def chat(req: ChatRequest, Login: Optional[str] = Header(None)):
     PACK_STATE.setdefault(user_id, {"intent": None, "slots": {}, "awaiting": None})
     LEAVE_STATE.setdefault(user_id, {"intent": None, "slots": {}})
     TIME_SLIP_STATE.setdefault(user_id, {"intent": None, "slots": {}})
+    ATTENDANCE_STATE.setdefault(user_id, {"intent": None, "slots": {}, "selected_payperiod": None})
     PURCHASE_STATE.setdefault(user_id, {"intent": None, "slots": {}})
 
     pack_state = PACK_STATE[user_id]
     leave_state = LEAVE_STATE[user_id]
     ts_state = TIME_SLIP_STATE[user_id]
+    attendance_state = ATTENDANCE_STATE[user_id]
     purchase_state = PURCHASE_STATE[user_id]
 
     # ========================================================
@@ -608,13 +631,13 @@ async def chat(req: ChatRequest, Login: Optional[str] = Header(None)):
                 perm_text = _format_permission_balance_response(perm_records)
                 greeting += ("\n\n" if greeting else "") + perm_text
 
-            greeting += "\n\nI can help you apply Leave, submit a Time Slip, or create a Pack."
+            greeting += "\n\nI can help you apply Leave, submit a Time Slip, view Daily Attendance, or create a Pack."
             return {"status": "success", "message": greeting.strip()}
 
         except Exception:
             return {
                 "status": "success",
-                "message": "Hello! 👋 I can help you apply Leave, submit a Time Slip, or create a Pack."
+                "message": "Hello! 👋 I can help you apply Leave, submit a Time Slip, view Daily Attendance, or create a Pack."
             }
 
     # ========================================================
@@ -656,6 +679,7 @@ async def chat(req: ChatRequest, Login: Optional[str] = Header(None)):
         pack_state.get("intent"),
         leave_state.get("intent"),
         ts_state.get("intent"),
+        attendance_state.get("intent"),
         purchase_state.get("intent"),
     ]):
         root_intent = resolve_intent(message)
@@ -663,6 +687,8 @@ async def chat(req: ChatRequest, Login: Optional[str] = Header(None)):
             leave_state["intent"] = "apply"
         elif root_intent == "time_slip":
             ts_state["intent"] = "apply"
+        elif root_intent == "attendance":
+            attendance_state["intent"] = "get"
         elif root_intent == "purchase":
             purchase_state["intent"] = "create"
 
@@ -912,6 +938,101 @@ async def chat(req: ChatRequest, Login: Optional[str] = Header(None)):
         return result
 
     # ========================================================
+    # CONTINUE ACTIVE ATTENDANCE FLOW
+    # ========================================================
+
+    if attendance_state["intent"] == "get":
+        is_selection = False
+
+        if "last_options" in attendance_state:
+            options = attendance_state["last_options"]
+            selected = None
+
+            if message.isdigit():
+                idx = int(message) - 1
+                if 0 <= idx < len(options):
+                    selected = options[idx]
+
+            if not selected:
+                labels = [o["label"].lower() for o in options]
+                close = difflib.get_close_matches(message.lower(), labels, n=1, cutoff=0.7)
+                if close:
+                    selected = next((o for o in options if o["label"].lower() == close[0]), None)
+
+            if selected:
+                record = selected.get("record", {})
+                attendance_state["selected_payperiod"] = record if isinstance(record, dict) else {}
+                attendance_state["slots"]["PayPeriodName"] = selected["label"]
+                attendance_state["slots"]["PayPeriodId"] = str(attendance_state["selected_payperiod"].get("id", ""))
+                is_selection = True
+                attendance_state.pop("last_options", None)
+                attendance_state.pop("awaiting_field", None)
+
+        if not is_selection:
+            ai = call_attendance_chat(message)
+            slots = normalize_attendance_slots(ai.get("action", {}).get("slots", {}))
+            if slots.get("PayPeriodName"):
+                attendance_state["slots"]["PayPeriodName"] = slots["PayPeriodName"]
+            if slots.get("PayPeriodId"):
+                attendance_state["slots"]["PayPeriodId"] = str(slots["PayPeriodId"])
+
+        if not attendance_state.get("selected_payperiod"):
+            payperiods = get_pay_periods(login)
+            if not payperiods:
+                return {
+                    "status": "error",
+                    "message": "Unable to fetch pay periods at the moment. Please try again later."
+                }
+
+            normalized_payperiods = [normalize_payperiod_record(p) for p in payperiods]
+            options = _build_options(
+                normalized_payperiods,
+                label_keys=("name",),
+                value_keys=("id",)
+            )
+            attendance_state["last_options"] = options
+            attendance_state["awaiting_field"] = "PayPeriod"
+            options_text = "\n".join(f"{i+1}. {o['label']}" for i, o in enumerate(options))
+            return {
+                "status": "success",
+                "message": f"Please select the PayPeriod from the options below:\n{options_text}\n\nReply with the number of your choice."
+            }
+
+        selected_payperiod = attendance_state["selected_payperiod"]
+        if not selected_payperiod.get("fromDate") or not selected_payperiod.get("toDate"):
+            attendance_state.pop("selected_payperiod", None)
+            return {
+                "status": "error",
+                "message": "Unable to read the selected PayPeriod dates. Please try selecting the PayPeriod again."
+            }
+
+        try:
+            result = get_daily_attendance(login, selected_payperiod)
+            decoded_body = _extract_decoded_service_body(result)
+            body_text = _format_service_body(decoded_body)
+            if body_text:
+                message_text = body_text
+            else:
+                message_text = "Daily attendance retrieved successfully."
+
+            ATTENDANCE_STATE.pop(user_id, None)
+            return {
+                "status": "success",
+                "message": message_text
+            }
+        except Exception as e:
+            error_msg = str(e)
+            if "timed out" in error_msg.lower() or "timeout" in error_msg.lower():
+                return {
+                    "status": "error",
+                    "message": "Server is taking too long to respond. Please try again later."
+                }
+            return {
+                "status": "error",
+                "message": f"Failed to fetch daily attendance: {error_msg}"
+            }
+
+    # ========================================================
     # CONTINUE ACTIVE PURCHASE FLOW
     # ========================================================
 
@@ -1105,5 +1226,5 @@ async def chat(req: ChatRequest, Login: Optional[str] = Header(None)):
 
     return {
         "status": "success",
-        "message": "I can help you apply Leave, submit a Time Slip, or create a Purchase Order."
+        "message": "I can help you apply Leave, submit a Time Slip, view Daily Attendance, create a Purchase Order, or create a Pack."
     }

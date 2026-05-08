@@ -162,5 +162,88 @@
         "SectionId": 0
       }
     ]
+  },
+  "ATTENDANCE_PAY_PERIOD_CRITERIA": {
+    "SectionCriteriaList": [
+      {
+        "SectionId": 0,
+        "AttributesCriteriaList": [
+          {
+            "FieldName": "Type",
+            "OperationType": 1,
+            "FieldValue": 1,
+            "InArray": null,
+            "JoinType": 2
+          },
+          {
+            "FieldName": "EmployeeId",
+            "OperationType": 1,
+            "FieldValue": "{{login_dto.userId}}",
+            "InArray": null,
+            "JoinType": 0
+          },
+          {
+            "FieldName": "Period.Id",
+            "OperationType": 1,
+            "FieldValue": -1499999985,
+            "InArray": null,
+            "JoinType": 2
+          },
+          {
+            "FieldName": "IsVisible",
+            "OperationType": 1,
+            "FieldValue": 0,
+            "InArray": null,
+            "JoinType": 2
+          },
+          {
+            "FieldName": "PeriodType",
+            "OperationType": 1,
+            "FieldValue": 0,
+            "InArray": null,
+            "JoinType": 2
+          },
+          {
+            "FieldName": "displayname",
+            "OperationType": 2,
+            "FieldValue": "",
+            "InArray": null,
+            "JoinType": 0
+          }
+        ],
+        "OperationType": 0
+      }
+    ]
+  },
+  "ATTENDANCE_DAILY_CRITERIA": {
+    "SectionCriteriaList": [
+      {
+        "SectionId": 0,
+        "AttributesCriteriaList": [
+          {
+            "FieldName": "EmployeeId",
+            "OperationType": 5,
+            "FieldValue": "{{login_dto.userId}}",
+            "InArray": null,
+            "JoinType": 2
+          },
+          {
+            "FieldName": "PeriodFromDate",
+            "OperationType": 10,
+            "FieldValue": "{{selected_payperiod.fromDate}}",
+            "InArray": null,
+            "JoinType": 2
+          },
+          {
+            "FieldName": "PeriodToDate",
+            "OperationType": 11,
+            "FieldValue": "{{selected_payperiod.toDate}}",
+            "InArray": null,
+            "JoinType": 2
+          }
+        ],
+        "OperationType": 1
+      }
+    ]
   }
 }
