@@ -1016,6 +1016,19 @@ async def chat(req: ChatRequest, Login: Optional[str] = Header(None)):
 
         try:
             result = get_daily_attendance(login, selected_payperiod)
+            if isinstance(result, dict) and result.get("status_code", 200) >= 400:
+                error_body = result.get("body") or result.get("raw_body") or {}
+                if isinstance(error_body, (dict, list)):
+                    error_text = json.dumps(error_body, indent=2, ensure_ascii=False, default=str)
+                else:
+                    error_text = str(error_body)
+                if not error_text.strip():
+                    error_text = "Failed to fetch daily attendance."
+                return {
+                    "status": "error",
+                    "message": f"Failed to fetch daily attendance: {error_text}"
+                }
+
             decoded_body = _extract_decoded_service_body(result)
             body_text = _format_service_body(decoded_body)
             if body_text:

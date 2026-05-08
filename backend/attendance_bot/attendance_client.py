@@ -10,6 +10,7 @@ from typing import Any, Dict, List
 import requests
 
 from config import settings
+from utils.date_parser import parse_date
 
 
 logging.basicConfig(
@@ -94,6 +95,29 @@ def _to_gb_date(value: Any) -> str:
             return f"/Date({int(dt.timestamp() * 1000)})/"
         except ValueError:
             continue
+
+    return ""
+
+
+def _to_ddmmyyyy(value: Any) -> str:
+    """
+    Convert a date-like value into DD-MM-YYYY format.
+    Returns an empty string if the value cannot be parsed.
+    """
+    if value in (None, ""):
+        return ""
+
+    text = str(value).strip()
+    if not text:
+        return ""
+
+    parsed = parse_date(text)
+    if parsed:
+        return parsed
+
+    if re.match(r"^\d{1,2}[-/]\d{1,2}[-/]\d{4}$", text):
+        parts = re.split(r"[-/]", text)
+        return f"{int(parts[0]):02d}-{int(parts[1]):02d}-{parts[2]}"
 
     return ""
 
@@ -272,6 +296,46 @@ def normalize_payperiod_record(record: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _build_attendance_date_candidates(selected_payperiod: Dict[str, Any]) -> List[Dict[str, str]]:
+    """
+    Build a small set of date representations to try against the attendance API.
+    This is intentionally conservative and only uses values already present in the
+    selected pay period record.
+    """
+    candidates = []
+
+    from_candidates = [
+        selected_payperiod.get("fromDateRaw"),
+        selected_payperiod.get("fromDate"),
+        _to_ddmmyyyy(selected_payperiod.get("fromDateRaw")),
+        _to_ddmmyyyy(selected_payperiod.get("fromDate")),
+    ]
+    to_candidates = [
+        selected_payperiod.get("toDateRaw"),
+        selected_payperiod.get("toDate"),
+        _to_ddmmyyyy(selected_payperiod.get("toDateRaw")),
+        _to_ddmmyyyy(selected_payperiod.get("toDate")),
+    ]
+
+    seen = set()
+    for from_value in from_candidates:
+        if not from_value:
+            continue
+        for to_value in to_candidates:
+            if not to_value:
+                continue
+            key = (str(from_value).strip(), str(to_value).strip())
+            if key in seen:
+                continue
+            seen.add(key)
+            candidates.append({
+                "fromDate": str(from_value).strip(),
+                "toDate": str(to_value).strip(),
+            })
+
+    return candidates
+
+
 def get_daily_attendance(login: Dict[str, Any], selected_payperiod: Dict[str, Any]) -> Dict[str, Any]:
     logger.info("📋 Fetching daily attendance from API...")
     try:
@@ -279,20 +343,47 @@ def get_daily_attendance(login: Dict[str, Any], selected_payperiod: Dict[str, An
         if not payload:
             raise Exception("ATTENDANCE_DAILY_CRITERIA not found in criteria.json")
 
-        prepared = _prepare_payload(payload, login, selected_payperiod)
         employee_id = login.get("UserId")
         url = direct_url(f"/prs/DailyAttendance.svc/DailyAttendanceEmployeeDetail/?EmployeeId={employee_id}", login)
         headers = {"Content-Type": "application/json", "Login": json.dumps(login)}
 
-        response = session.post(url, json=prepared, headers=headers, timeout=60)
-        response.raise_for_status()
-        response_json = response.json()
-        parsed_body = parse_api_response(response_json)
-        return {
-            "body": parsed_body if parsed_body not in (None, "", [], {}) else response_json,
-            "raw_body": response_json,
-            "status_code": response.status_code
-        }
+        candidates = _build_attendance_date_candidates(selected_payperiod)
+        last_error = None
+
+        for date_pair in candidates:
+            prepared = _prepare_payload(payload, login, date_pair)
+            response = session.post(url, json=prepared, headers=headers, timeout=60)
+
+            if response.status_code == 200:
+                response_json = response.json()
+                parsed_body = parse_api_response(response_json)
+                return {
+                    "body": parsed_body if parsed_body not in (None, "", [], {}) else response_json,
+                    "raw_body": response_json,
+                    "used_dates": date_pair,
+                    "status_code": response.status_code
+                }
+
+            try:
+                response_json = response.json()
+            except Exception:
+                response_json = {}
+
+            parsed_error = parse_api_response(response_json) if isinstance(response_json, dict) else []
+            last_error = {
+                "status_code": response.status_code,
+                "body": response_json if response_json else response.text,
+                "used_dates": date_pair,
+                "parsed_error": parsed_error,
+            }
+
+            error_text = json.dumps(response_json, default=str) if response_json else response.text
+            if "Input string was not in a correct format" not in error_text:
+                break
+
+        if last_error:
+            return last_error
+        raise Exception("Daily attendance request failed without a usable response.")
     except Exception as e:
         logger.error(f"❌ Failed to fetch daily attendance: {e}")
         raise
