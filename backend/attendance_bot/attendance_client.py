@@ -1,5 +1,6 @@
 import base64
 import copy
+import calendar
 import gzip
 import json
 import logging
@@ -118,6 +119,55 @@ def _to_ddmmyyyy(value: Any) -> str:
     if re.match(r"^\d{1,2}[-/]\d{1,2}[-/]\d{4}$", text):
         parts = re.split(r"[-/]", text)
         return f"{int(parts[0]):02d}-{int(parts[1]):02d}-{parts[2]}"
+
+    return ""
+
+
+def _to_epoch_seconds(value: Any) -> str:
+    """
+    Convert a date-like value into epoch seconds as a string.
+    This matches the format used by other GB summary APIs that accept
+    PeriodFromDate / PeriodToDate style criteria.
+    """
+    if value in (None, ""):
+        return ""
+
+    text = str(value).strip()
+    if not text:
+        return ""
+
+    # /Date(1714521600000)/
+    match = re.search(r"/Date\((\d+)\)/", text)
+    if match:
+        return str(int(match.group(1)) // 1000)
+
+    # Raw epoch seconds or milliseconds
+    if text.isdigit():
+        num = int(text)
+        return str(num // 1000) if num > 9_999_999_999 else str(num)
+
+    # Try the normalized DD-MM-YYYY form first
+    parsed = parse_date(text)
+    if parsed:
+        try:
+            dt = datetime.strptime(parsed, "%d-%m-%Y")
+            return str(calendar.timegm(dt.timetuple()))
+        except ValueError:
+            pass
+
+    # Try common direct formats
+    for fmt in (
+        "%d-%m-%Y",
+        "%d/%m/%Y",
+        "%Y-%m-%d",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S.%f",
+    ):
+        try:
+            dt = datetime.strptime(text, fmt)
+            return str(calendar.timegm(dt.timetuple()))
+        except ValueError:
+            continue
 
     return ""
 
@@ -305,12 +355,16 @@ def _build_attendance_date_candidates(selected_payperiod: Dict[str, Any]) -> Lis
     candidates = []
 
     from_candidates = [
+        _to_epoch_seconds(selected_payperiod.get("fromDateRaw")),
+        _to_epoch_seconds(selected_payperiod.get("fromDate")),
         selected_payperiod.get("fromDateRaw"),
         selected_payperiod.get("fromDate"),
         _to_ddmmyyyy(selected_payperiod.get("fromDateRaw")),
         _to_ddmmyyyy(selected_payperiod.get("fromDate")),
     ]
     to_candidates = [
+        _to_epoch_seconds(selected_payperiod.get("toDateRaw")),
+        _to_epoch_seconds(selected_payperiod.get("toDate")),
         selected_payperiod.get("toDateRaw"),
         selected_payperiod.get("toDate"),
         _to_ddmmyyyy(selected_payperiod.get("toDateRaw")),
