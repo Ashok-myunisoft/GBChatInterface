@@ -4,7 +4,7 @@ import base64
 import time
 import difflib
 from datetime import datetime
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, Header
 from fastapi.middleware.cors import CORSMiddleware
@@ -440,6 +440,260 @@ def _format_service_body(body) -> str:
         return str(body)
 
 
+ATTENDANCE_STATUS_MAP = {
+    "PP": "Present",
+    "A": "Absent",
+    "WO": "Week Off",
+    "PH": "Public Holiday",
+    "NONE": "No Data",
+}
+
+ATTENDANCE_STATUS_ORDER = ["Present", "Absent", "Week Off", "Public Holiday", "No Data"]
+
+
+def _normalize_attendance_status(value) -> Dict[str, str]:
+    raw = "" if value in (None, "") else str(value).strip().upper()
+    label = ATTENDANCE_STATUS_MAP.get(raw, raw.title() if raw else "No Data")
+    tone = {
+        "Present": "present",
+        "Absent": "absent",
+        "Week Off": "week_off",
+        "Public Holiday": "public_holiday",
+        "No Data": "no_data",
+    }.get(label, "no_data")
+    return {
+        "code": raw or "NONE",
+        "label": label,
+        "tone": tone,
+    }
+
+
+def _normalize_attendance_date_value(record: Dict[str, Any]) -> str:
+    return _format_attendance_date(
+        record.get("DailyAttendanceAttendanceDate")
+        or record.get("AttendanceDate")
+        or record.get("Date")
+    )
+
+
+def _parse_clock_time(value) -> tuple[str, bool]:
+    if value in (None, "", 0, "0"):
+        return "", False
+
+    text = str(value).strip()
+    if not text or text in {"00:00", "0:00", "00:00:00"}:
+        return "", False
+
+    match = re.match(r"^(\d{1,2}):(\d{2})(?::(\d{2}))?$", text)
+    if match:
+        hour = int(match.group(1))
+        minute = int(match.group(2))
+        if hour == 0 and minute == 0:
+            return "", False
+        try:
+            dt = datetime.strptime(f"{hour:02d}:{minute:02d}", "%H:%M")
+            return dt.strftime("%I:%M %p"), True
+        except ValueError:
+            return f"{hour:02d}:{minute:02d}", True
+
+    if text.isdigit():
+        minutes = int(text)
+        if minutes <= 0:
+            return "", False
+        hour = (minutes // 60) % 24
+        minute = minutes % 60
+        try:
+            dt = datetime.strptime(f"{hour:02d}:{minute:02d}", "%H:%M")
+            return dt.strftime("%I:%M %p"), True
+        except ValueError:
+            return f"{hour:02d}:{minute:02d}", True
+
+    return text, True
+
+
+def _format_worked_duration(value) -> str:
+    if value in (None, "", 0, "0"):
+        return "--"
+
+    text = str(value).strip()
+    if not text or text in {"00:00", "0:00", "00:00:00"}:
+        return "--"
+
+    match = re.match(r"^(\d{1,2}):(\d{2})(?::(\d{2}))?$", text)
+    if match:
+        hours = int(match.group(1))
+        minutes = int(match.group(2))
+        if hours == 0 and minutes == 0:
+            return "--"
+        return f"{hours:02d}:{minutes:02d} Hrs"
+
+    if text.isdigit():
+        total_minutes = int(text)
+        if total_minutes <= 0:
+            return "--"
+        hours = total_minutes // 60
+        minutes = total_minutes % 60
+        return f"{hours:02d}:{minutes:02d} Hrs"
+
+    return f"{text} Hrs"
+
+
+def _attendance_row_remarks(record: Dict[str, Any], in_time: str, out_time: str) -> Dict[str, str]:
+    remarks = (record.get("DailyAttendanceRemarks") or record.get("Remarks") or "").strip()
+    if in_time != "--" and out_time == "--" and not remarks:
+        remarks = "Incomplete Punch"
+    if not remarks:
+        remarks = "-"
+    tone = "incomplete" if remarks == "Incomplete Punch" else "normal"
+    return {
+        "value": remarks,
+        "tone": tone,
+    }
+
+
+def _build_attendance_row(record: Dict[str, Any]) -> Dict[str, Any]:
+    status = _normalize_attendance_status(
+        record.get("TextDayType")
+        or record.get("DailyAttendanceDayType")
+        or record.get("Type")
+        or record.get("Status")
+    )
+
+    in_raw = (
+        record.get("DailyAttendanceCalInTime")
+        or record.get("In")
+        or record.get("DailyAttendanceInTime")
+    )
+    out_raw = (
+        record.get("DailyAttendanceCalOutTime")
+        or record.get("Out")
+        or record.get("DailyAttendanceOutTime")
+    )
+    worked_raw = (
+        record.get("DailyAttendanceCalWorkedHours")
+        or record.get("Worked")
+        or record.get("DailyAttendanceWorkedHours")
+    )
+
+    in_time, has_in_time = _parse_clock_time(in_raw)
+    out_time, has_out_time = _parse_clock_time(out_raw)
+    worked_hours = _format_worked_duration(worked_raw)
+    remarks = _attendance_row_remarks(record, in_time, out_time)
+
+    return {
+        "date": _normalize_attendance_date_value(record),
+        "status": status["label"],
+        "statusCode": status["code"],
+        "statusTone": status["tone"],
+        "inTime": in_time or "--",
+        "outTime": out_time or "--",
+        "workedHours": worked_hours,
+        "workType": (record.get("WorkTypeName") or record.get("WorkType") or "").strip() or "-",
+        "shift": (record.get("ShiftDescription") or record.get("Shift") or "").strip() or "-",
+        "remarks": remarks["value"],
+        "remarksTone": remarks["tone"],
+        "hasInTime": has_in_time,
+        "hasOutTime": has_out_time,
+        "isIncompletePunch": remarks["tone"] == "incomplete",
+    }
+
+
+def _build_attendance_summary(rows: List[Dict[str, Any]]) -> Dict[str, int]:
+    summary = {
+        "totalDays": len(rows),
+        "presentDays": 0,
+        "absentDays": 0,
+        "weekOffDays": 0,
+        "holidayDays": 0,
+        "incompletePunches": 0,
+    }
+
+    for row in rows:
+        tone = row.get("statusTone")
+        if tone == "present":
+            summary["presentDays"] += 1
+        elif tone == "absent":
+            summary["absentDays"] += 1
+        elif tone == "week_off":
+            summary["weekOffDays"] += 1
+        elif tone == "public_holiday":
+            summary["holidayDays"] += 1
+
+        if row.get("isIncompletePunch"):
+            summary["incompletePunches"] += 1
+
+    return summary
+
+
+def _build_attendance_markdown(rows: List[Dict[str, Any]]) -> str:
+    if not rows:
+        return ""
+
+    lines = [f"Daily attendance for {len(rows)} day(s):", ""]
+    lines.append("| Date | Status | In Time | Out Time | Worked Hours | Work Type | Shift | Remarks |")
+    lines.append("| --- | --- | --- | --- | --- | --- | --- | --- |")
+
+    for row in rows:
+        lines.append(
+            "| "
+            + " | ".join([
+                _escape_md_cell(row.get("date")),
+                _escape_md_cell(row.get("status")),
+                _escape_md_cell(row.get("inTime")),
+                _escape_md_cell(row.get("outTime")),
+                _escape_md_cell(row.get("workedHours")),
+                _escape_md_cell(row.get("workType")),
+                _escape_md_cell(row.get("shift")),
+                _escape_md_cell(row.get("remarks")),
+            ])
+            + " |"
+        )
+
+    return "\n".join(lines)
+
+
+def build_attendance_view(payload) -> Dict[str, Any]:
+    records = _parse_attendance_records(payload)
+    rows = [_build_attendance_row(record) for record in records if isinstance(record, dict)]
+    if not rows:
+        return {
+            "message": "",
+            "data": {
+                "rows": [],
+                "summary": _build_attendance_summary([]),
+                "columns": [
+                    "Date",
+                    "Status",
+                    "In Time",
+                    "Out Time",
+                    "Worked Hours",
+                    "Work Type",
+                    "Shift",
+                    "Remarks",
+                ],
+            },
+        }
+
+    summary = _build_attendance_summary(rows)
+    return {
+        "message": _build_attendance_markdown(rows),
+        "data": {
+            "rows": rows,
+            "summary": summary,
+            "columns": [
+                "Date",
+                "Status",
+                "In Time",
+                "Out Time",
+                "Worked Hours",
+                "Work Type",
+                "Shift",
+                "Remarks",
+            ],
+        },
+    }
+
+
 def _parse_attendance_records(payload):
     """
     Extract attendance rows from the daily attendance service response.
@@ -529,89 +783,7 @@ def _escape_md_cell(value) -> str:
 
 
 def _format_attendance_response(payload) -> str:
-    records = _parse_attendance_records(payload)
-    if not records:
-        return ""
-
-    lines = [f"Daily attendance for {len(records)} day(s):", ""]
-    lines.append("| Date | Type | In | Out | Worked | Work Type | Shift | Remarks |")
-    lines.append("| --- | --- | --- | --- | --- | --- | --- | --- |")
-
-    row_count = 0
-    for record in records:
-        if not isinstance(record, dict):
-            continue
-
-        date_text = _format_attendance_date(
-            record.get("DailyAttendanceAttendanceDate")
-            or record.get("AttendanceDate")
-            or record.get("Date")
-        )
-        day_type = (
-            record.get("TextDayType")
-            or record.get("DailyAttendanceDayType")
-            or ""
-        )
-        in_time = (
-            record.get("DailyAttendanceCalInTime")
-            or _format_minutes_as_hhmm(record.get("DailyAttendanceInTime"))
-            or ""
-        )
-        out_time = (
-            record.get("DailyAttendanceCalOutTime")
-            or _format_minutes_as_hhmm(record.get("DailyAttendanceOutTime"))
-            or ""
-        )
-        worked = (
-            record.get("DailyAttendanceCalWorkedHours")
-            or _format_minutes_as_hhmm(record.get("DailyAttendanceWorkedHours"))
-            or ""
-        )
-        remarks = (record.get("DailyAttendanceRemarks") or "").strip()
-        work_type = (record.get("WorkTypeName") or "").strip()
-        shift = (record.get("ShiftDescription") or "").strip()
-
-        parts = []
-        if date_text:
-            parts.append(date_text)
-        if day_type not in (None, ""):
-            parts.append(f"Type {day_type}")
-        if in_time:
-            parts.append(f"In {in_time}")
-        if out_time:
-            parts.append(f"Out {out_time}")
-        if worked:
-            parts.append(f"Worked {worked}")
-        if work_type:
-            parts.append(f"Work {work_type}")
-        if shift:
-            parts.append(f"Shift {shift}")
-        if remarks:
-            parts.append(f"Remarks {remarks}")
-
-        if not parts:
-            parts.append("No attendance details available")
-
-        lines.append(
-            "| "
-            + " | ".join([
-                _escape_md_cell(date_text),
-                _escape_md_cell(day_type),
-                _escape_md_cell(in_time),
-                _escape_md_cell(out_time),
-                _escape_md_cell(worked),
-                _escape_md_cell(work_type),
-                _escape_md_cell(shift),
-                _escape_md_cell(remarks),
-            ])
-            + " |"
-        )
-        row_count += 1
-
-    if row_count == 0:
-        return ""
-
-    return "\n".join(lines)
+    return build_attendance_view(payload).get("message", "")
 
 
 def apply_leave_flow(slots, login):
@@ -1213,12 +1385,15 @@ async def chat(req: ChatRequest, Login: Optional[str] = Header(None)):
                 }
 
             attendance_body = result.get("body") if isinstance(result, dict) else result
-            formatted_attendance = _format_attendance_response(attendance_body)
+            attendance_view = build_attendance_view(attendance_body)
+            formatted_attendance = attendance_view.get("message", "")
+            attendance_data = attendance_view.get("data", {})
             if formatted_attendance:
                 ATTENDANCE_STATE.pop(user_id, None)
                 return {
                     "status": "success",
-                    "message": formatted_attendance
+                    "message": formatted_attendance,
+                    "attendanceData": attendance_data
                 }
 
             decoded_body = _extract_decoded_service_body(result)
@@ -1231,7 +1406,8 @@ async def chat(req: ChatRequest, Login: Optional[str] = Header(None)):
             ATTENDANCE_STATE.pop(user_id, None)
             return {
                 "status": "success",
-                "message": message_text
+                "message": message_text,
+                "attendanceData": attendance_data
             }
         except Exception as e:
             error_msg = str(e)

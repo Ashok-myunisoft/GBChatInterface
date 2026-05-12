@@ -389,7 +389,6 @@ def _build_attendance_date_candidates(selected_payperiod: Dict[str, Any]) -> Lis
 
     return candidates
 
-
 def get_daily_attendance(login: Dict[str, Any], selected_payperiod: Dict[str, Any]) -> Dict[str, Any]:
     logger.info("📋 Fetching daily attendance from API...")
     try:
