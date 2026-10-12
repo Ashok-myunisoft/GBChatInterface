@@ -1,0 +1,33 @@
+{
+  "_verified": true,
+  "_how_to_verify": "Open the Menu screen -> DevTools -> Sources -> find menu.php (or the page's rendered HTML via Elements tab) -> read the <select id=\"MenuType\">, <select id=\"MenuNature\">, <select id=\"MenuStatus\"> option values/labels directly. These are static HTML options, not a DB-driven picklist, so there is no SelectList endpoint to fetch them from live -- they must be read from the form once and set '_verified' to true below.",
+
+  "MenuType": {
+    "0": "Master",
+    "1": "Transaction",
+    "2": "Report",
+    "3": "Others",
+    "4": "Bot",
+    "5": "Dashboard"
+  },
+
+  "MenuNature": {
+    "0": "Form",
+    "1": "Report",
+    "2": "ParentMenu",
+    "3": "Page",
+    "4": "Portlet",
+    "5": "Analysis"
+  },
+
+  "MenuStatus": {
+    "0": "Pending",
+    "1": "Active",
+    "2": "Deleted",
+    "3": "Amended",
+    "4": "InActive",
+    "5": "Archived"
+  },
+
+  "MenuStatus_default": "1"
+}

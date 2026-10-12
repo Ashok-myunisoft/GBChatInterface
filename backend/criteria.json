@@ -1,0 +1,301 @@
+{
+  "LEAVE_TYPE_CRITERIA": {
+    "SectionCriteriaList": [
+      {
+        "AttributesCriteriaList": [
+          {
+            "FieldName": "LeaveType",
+            "FieldValue": 5,
+            "InArray": null,
+            "JoinType": 2,
+            "OperationType": 7
+          },
+          {
+            "FieldName": "Name",
+            "FieldValue": "",
+            "InArray": null,
+            "JoinType": 0,
+            "OperationType": 2
+          }
+        ],
+        "OperationType": 0,
+        "SectionId": 0
+      }
+    ]
+  },
+  "LEAVE_REASON_CRITERIA": {
+    "SectionCriteriaList": [
+      {
+        "SectionId": 0,
+        "AttributesCriteriaList": [
+          {
+            "FieldName": "ReasonType.Id",
+            "FieldValue": -1199998883,
+            "InArray": null,
+            "JoinType": 2,
+            "OperationType": 5
+          },
+          {
+            "FieldName": "Name",
+            "FieldValue": "",
+            "InArray": null,
+            "JoinType": 0,
+            "OperationType": 2
+          }
+        ],
+        "OperationType": 0
+      }
+    ]
+  },
+  "TIMESLIP_BALANCE_CRITERIA": {
+    "SectionCriteriaList": [
+      {
+        "SectionId": 0,
+        "AttributesCriteriaList": [
+          {
+            "FieldName": "PeriodFromDate",
+            "OperationType": 10,
+            "FieldValue": "",
+            "JoinType": 0
+          },
+          {
+            "FieldName": "PeriodToDate",
+            "OperationType": 11,
+            "FieldValue": "",
+            "JoinType": 0
+          },
+          {
+            "FieldName": "EmployeeId",
+            "OperationType": 5,
+            "FieldValue": 0,
+            "JoinType": 2
+          },
+          {
+            "FieldName": "OUId",
+            "OperationType": 5,
+            "FieldValue": 0,
+            "JoinType": 2
+          }
+        ],
+        "OperationType": 0
+      }
+    ]
+  },
+  "LEAVE_BALANCE_CRITERIA": {
+    "SectionCriteriaList": [
+      {
+        "SectionId": 0,
+        "AttributesCriteriaList": [
+          {
+            "FieldName": "EmployeeId",
+            "FieldValue": 0,
+            "InArray": null,
+            "JoinType": 2,
+            "OperationType": 1
+          },
+          {
+            "FieldName": "PeriodFrom",
+            "FieldValue": "",
+            "InArray": null,
+            "JoinType": 2,
+            "OperationType": 1
+          },
+          {
+            "FieldName": "PeriodTo",
+            "FieldValue": "",
+            "InArray": null,
+            "JoinType": 0,
+            "OperationType": 1
+          }
+        ],
+        "OperationType": 0
+      }
+    ]
+  },
+  "PARTY_CRITERIA": {
+    "SectionCriteriaList": [
+      {
+        "AttributesCriteriaList": [
+          {
+            "FieldName": "Name",
+            "FieldValue": "",
+            "InArray": null,
+            "JoinType": 0,
+            "OperationType": 2
+          }
+        ],
+        "OperationType": 0,
+        "SectionId": 0
+      }
+    ]
+  },
+  "ITEM_CRITERIA": {
+    "SectionCriteriaList": [
+      {
+        "AttributesCriteriaList": [
+          {
+            "FieldName": "Name",
+            "FieldValue": "",
+            "InArray": null,
+            "JoinType": 0,
+            "OperationType": 2
+          }
+        ],
+        "OperationType": 0,
+        "SectionId": 0
+      }
+    ]
+  },
+  "STORE_CRITERIA": {
+    "SectionCriteriaList": [
+      {
+        "AttributesCriteriaList": [
+          {
+            "FieldName": "Name",
+            "FieldValue": "",
+            "InArray": null,
+            "JoinType": 0,
+            "OperationType": 2
+          }
+        ],
+        "OperationType": 0,
+        "SectionId": 0
+      }
+    ]
+  },
+  "ATTENDANCE_PAY_PERIOD_CRITERIA": {
+    "SectionCriteriaList": [
+      {
+        "SectionId": 0,
+        "AttributesCriteriaList": [
+          {
+            "FieldName": "Type",
+            "OperationType": 1,
+            "FieldValue": 1,
+            "InArray": null,
+            "JoinType": 2
+          },
+          {
+            "FieldName": "EmployeeId",
+            "OperationType": 1,
+            "FieldValue": "{{login_dto.userId}}",
+            "InArray": null,
+            "JoinType": 0
+          },
+          {
+            "FieldName": "Period.Id",
+            "OperationType": 1,
+            "FieldValue": -1499999985,
+            "InArray": null,
+            "JoinType": 2
+          },
+          {
+            "FieldName": "IsVisible",
+            "OperationType": 1,
+            "FieldValue": 0,
+            "InArray": null,
+            "JoinType": 2
+          },
+          {
+            "FieldName": "PeriodType",
+            "OperationType": 1,
+            "FieldValue": 0,
+            "InArray": null,
+            "JoinType": 2
+          },
+          {
+            "FieldName": "displayname",
+            "OperationType": 2,
+            "FieldValue": "",
+            "InArray": null,
+            "JoinType": 0
+          }
+        ],
+        "OperationType": 0
+      }
+    ]
+  },
+  "ATTENDANCE_DAILY_CRITERIA": {
+    "SectionCriteriaList": [
+      {
+        "SectionId": 0,
+        "AttributesCriteriaList": [
+          {
+            "FieldName": "EmployeeId",
+            "OperationType": 5,
+            "FieldValue": "{{login_dto.userId}}",
+            "InArray": null,
+            "JoinType": 2
+          },
+          {
+            "FieldName": "PeriodFromDate",
+            "OperationType": 10,
+            "FieldValue": "{{selected_payperiod.fromDate}}",
+            "InArray": null,
+            "JoinType": 2
+          },
+          {
+            "FieldName": "PeriodToDate",
+            "OperationType": 11,
+            "FieldValue": "{{selected_payperiod.toDate}}",
+            "InArray": null,
+            "JoinType": 2
+          }
+        ],
+        "OperationType": 1
+      }
+    ]
+  },
+  "ACTIVITY_LIST": [
+    "Project Management",
+    "System Analysis",
+    "User Acceptance Testing",
+    "Training",
+    "Development Analysis",
+    "Design",
+    "Coding",
+    "Development Testing",
+    "Bug Fixing",
+    "Accounts",
+    "Testing Analysis",
+    "Test Creation",
+    "Customer Support",
+    "Customer Meeting",
+    "Followup Over Phone",
+    "Interviews",
+    "Proposal Building",
+    "Requirement Study",
+    "Team Review",
+    "Marketing",
+    "Sales",
+    "Demo",
+    "Followup Visit",
+    "Outstation Travel",
+    "Boarding (Food)",
+    "Content Management",
+    "Settings & Configuration",
+    "Data Import",
+    "Recruitment Process",
+    "Lodging (Hotel Bills)",
+    "OTHERS",
+    "FUEL",
+    "Digital Marketing",
+    "Entertainment Expenses",
+    "Incidental Expenses",
+    "Local Travel",
+    "Outstation Local Travel",
+    "Water Expense",
+    "Pooja Expense",
+    "Gmail Account",
+    "Server Charge",
+    "Stationery",
+    "Office Celebration Expense",
+    "House Keeping Expenses",
+    "Business Card Printing Expense",
+    "Courier and Postal Expense",
+    "ID Card Purchase Expense",
+    "Data Validation",
+    "Documentation",
+    "NONE"
+  ]
+}
