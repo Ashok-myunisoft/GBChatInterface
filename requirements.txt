@@ -1,0 +1,14 @@
+fastapi
+uvicorn[standard]
+httpx
+pydantic
+python-dotenv
+requests
+langchain
+langchain_community
+ollama
+langchain_openai
+holidays
+mcp[cli]>=1.0.0
+openai>=1.30.0
+ 

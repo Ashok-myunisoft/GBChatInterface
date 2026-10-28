@@ -1,0 +1,15 @@
+{
+  "_verified": true,
+  "_how_verified": "ApplicableType 0 confirmed on a real record (DEMO-ADMIN = All Client) and 2 confirmed on a second real record (AProduction = Client Specific, checked directly in the GB4 UI). Value 1 (Trade Client) is inferred by elimination only, not independently observed on a real record -- flag if it ever looks wrong.",
+  "ApplicableType": {
+    "0": "All Client",
+    "1": "Trade Client",
+    "2": "Client Specific"
+  },
+  "ApplicableType_default": "0",
+  "Visible": {
+    "1": "Yes",
+    "2": "No",
+    "3": "Optional"
+  }
+}
