@@ -296,7 +296,17 @@ def _get_user_department_details(login: Dict[str, Any]) -> Dict[str, Any]:
     url = direct_url("fws/User/GetUser/", login)
     headers = {"Content-Type": "application/json", "Login": json.dumps(login)}
     response = session.get(url, params={"UserId": user_id}, headers=headers, timeout=60)
-    response.raise_for_status()
+    try:
+        response.raise_for_status()
+    except requests.HTTPError as exc:
+        error_body = response.text[:2000]
+        logger.error(
+            "GetUser failed: status=%s, UserId=%s, response_body=%s",
+            response.status_code, user_id, error_body,
+        )
+        raise RuntimeError(
+            f"GetUser failed with HTTP {response.status_code}: {error_body or 'empty response body'}"
+        ) from exc
     response_data = response.json()
 
     body = response_data.get("Body") if isinstance(response_data, dict) else response_data
