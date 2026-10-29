@@ -224,6 +224,15 @@ def _is_balance_query(message: str) -> bool:
     )
 
 
+def _is_greeting_message(message: str) -> bool:
+    normalized = re.sub(r"[^\w\s']", "", message.casefold()).strip()
+    return normalized in {
+        "hi", "hello", "hey", "howdy", "greetings",
+        "hi there", "hello there", "hey there",
+        "good morning", "good afternoon", "good evening",
+    }
+
+
 def _is_permission_balance_query(message: str) -> bool:
     msg = message.lower()
     words = re.findall(r'\b\w+\b', msg)
@@ -1000,7 +1009,7 @@ async def chat(req: ChatRequest, Login: Optional[str] = Header(None)):
     # FIRST MESSAGE GREETING
     # ========================================================
 
-    if user_id not in GREETED_USERS:
+    if _is_greeting_message(message):
         GREETED_USERS.add(user_id)
         try:
             balances = []
