@@ -295,7 +295,13 @@ def _get_user_department_details(login: Dict[str, Any]) -> Dict[str, Any]:
 
     url = direct_url("fws/User/GetUser/", login)
     headers = {"Content-Type": "application/json", "Login": json.dumps(login)}
-    response = session.get(url, params={"UserId": user_id}, headers=headers, timeout=60)
+    response = session.get(
+        url,
+        params={"UserId": user_id},
+        json={},
+        headers=headers,
+        timeout=60,
+    )
     try:
         response.raise_for_status()
     except requests.HTTPError as exc:
