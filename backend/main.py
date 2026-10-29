@@ -24,7 +24,6 @@ from pydantic import BaseModel
 
 from config import settings
 from utils.holiday_checker import check_date_warning
-from utils.date_parser import parse_date as _parse_leave_date
 
 # ---------------- MENU (in-process, replaces old HTTP proxy to services/menu-agent) ----------------
 from menu_bot.menu_client import menu_chat, shutdown_all_agents
@@ -410,43 +409,11 @@ def resolve_intent(message: str) -> str:
         "menu": menu_score,
     }
 
-    # A dated "apply" request with no signal for another workflow is a
-    # leave request (for example, "I want to apply on Oct 28").
-    if (
-        not any(scores.values())
-        and re.search(r"\b(apply|request|take)\b", msg)
-        and len(_extract_leave_date_mentions(message)) == 1
-    ):
-        scores["leave"] = 3
-
     best = max(scores, key=lambda k: scores[k])
     if scores[best] > 0:
         return best
 
     return "unknown"
-
-
-def _extract_leave_date_mentions(message: str) -> List[str]:
-    """Return parsed dates explicitly mentioned in a leave request message."""
-    months = (
-        "jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
-        "jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?"
-    )
-    weekdays = "monday|tuesday|wednesday|thursday|friday|saturday|sunday"
-    date_pattern = re.compile(
-        rf"\b(?:day after tomorrow|tomorrow|tmrw|today|yesterday|"
-        rf"(?:(?:next|last|this)\s+)?(?:{weekdays})|"
-        rf"\d{{4}}[-/]\d{{1,2}}[-/]\d{{1,2}}|"
-        rf"\d{{1,2}}[-/]\d{{1,2}}(?:[-/]\d{{2,4}})?|"
-        rf"\d{{1,2}}(?:st|nd|rd|th)?\s+(?:{months})|"
-        rf"(?:{months})\s+\d{{1,2}}(?:st|nd|rd|th)?)\b",
-        re.IGNORECASE,
-    )
-    return [
-        parsed
-        for match in date_pattern.finditer(message)
-        if (parsed := _parse_leave_date(match.group(0)))
-    ]
 
 
 # ============================================================
@@ -1192,18 +1159,6 @@ async def chat(req: ChatRequest, Login: Optional[str] = Header(None)):
                 is_selection = True
                 leave_state.pop("last_options", None)
                 leave_state.pop("awaiting_field", None)
-
-        # A single date in the initial leave request means a one-day leave.
-        # For two or more dates, preserve the existing range extraction flow.
-        if (
-            not is_selection
-            and not leave_state["slots"].get("FromDate")
-            and not leave_state["slots"].get("ToDate")
-        ):
-            mentioned_dates = _extract_leave_date_mentions(message)
-            if len(mentioned_dates) == 1:
-                leave_state["slots"]["FromDate"] = mentioned_dates[0]
-                leave_state["slots"]["ToDate"] = mentioned_dates[0]
 
         if not is_selection:
             has_date_pattern = bool(re.search(r"\d{1,2}[-/]\d{1,2}", message))
