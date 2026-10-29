@@ -284,6 +284,52 @@ def _gb_date(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%d")
 
 
+def _get_user_department_details(login: Dict[str, Any]) -> Dict[str, Any]:
+    """Fetch department fields for the current user from the live user service."""
+    user_id = next(
+        (login[key] for key in ("UserId", "userId") if login.get(key) not in (None, "")),
+        None,
+    )
+    if user_id is None:
+        raise ValueError("UserId not found in login DTO")
+
+    url = direct_url("fws/User/GetUser/", login)
+    headers = {"Content-Type": "application/json", "Login": json.dumps(login)}
+    response = session.get(url, params={"UserId": user_id}, headers=headers, timeout=60)
+    response.raise_for_status()
+    response_data = response.json()
+
+    body = response_data.get("Body") if isinstance(response_data, dict) else response_data
+    if isinstance(body, str):
+        decoded = decode_response_body(body)
+        body = decoded.get("Body", decoded.get("ResponseObject", decoded))
+        if isinstance(body, str):
+            try:
+                body = json.loads(body)
+            except json.JSONDecodeError:
+                pass
+
+    if isinstance(body, list):
+        body = body[0] if body else {}
+    if not isinstance(body, dict):
+        body = response_data.get("ResponseObject", {}) if isinstance(response_data, dict) else {}
+    if isinstance(body, str):
+        try:
+            body = json.loads(body)
+        except json.JSONDecodeError:
+            body = {}
+    if isinstance(body, list):
+        body = body[0] if body else {}
+    if not isinstance(body, dict):
+        raise ValueError("GetUser response body did not contain user details")
+
+    return {
+        "DepartmentCode": body.get("DepartmentCode"),
+        "DepartmentId": body.get("DepartmentId"),
+        "DepartmentName": body.get("DepartmentName"),
+    }
+
+
 # ============================================================
 # Apply Leave (STRICT PAYLOAD FIX)
 # ============================================================
@@ -323,6 +369,7 @@ def apply_leave(slots: Dict[str, Any], login: Dict[str, Any]) -> Dict[str, Any]:
             reason_id = int(reason_id)
         
         biz_type_id = get_biz_transaction_type_id(LEAVE_TRANSACTION_CLASS_ID, login)
+        department_details = _get_user_department_details(login)
         
         # Get Day Name (e.g., "Monday")
         day_name = from_dt.strftime("%A")
@@ -330,6 +377,9 @@ def apply_leave(slots: Dict[str, Any], login: Dict[str, Any]) -> Dict[str, Any]:
         # --- BUILD PAYLOAD STRICTLY MATCHING YOUR JSON SAMPLE ---
         payload = {
             "BizTransactionTypeId": biz_type_id,
+            **department_details,
+            "EmployeeCode": login["UserCode"],
+            "EmployeeId": login["UserId"],
             "EmployeeName": emp_name,
             "GuId": str(uuid.uuid4()),
             "MenuBasedResponce": 0,
