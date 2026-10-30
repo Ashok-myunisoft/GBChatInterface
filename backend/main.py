@@ -1,6 +1,7 @@
 import re
 import json
 import base64
+import hashlib
 import time
 import difflib
 import sys
@@ -24,6 +25,7 @@ from pydantic import BaseModel
 
 from config import settings
 from utils.holiday_checker import check_date_warning
+from utils.date_parser import parse_date as _parse_leave_date
 
 # ---------------- MENU (in-process, replaces old HTTP proxy to services/menu-agent) ----------------
 from menu_bot.menu_client import menu_chat, shutdown_all_agents
@@ -35,6 +37,7 @@ from pack_bot.pack_client import save_pack, get_gb_timestamp
 # ---------------- LEAVE ----------------
 from leave_bot.leave_agent import call_leave_chat, normalize_leave_slots
 from leave_bot.leave_client import (
+    LeaveApiError,
     apply_leave,
     get_leave_types_with_fallback as get_leave_types,
     get_leave_reasons,
@@ -134,6 +137,24 @@ GREETED_USERS: set = set()
 _STATE_TS: dict = {}
 STATE_TTL = 1800  # seconds — abandon after 30 min of inactivity
 
+
+def _login_state_key(login: Dict[str, Any]) -> str:
+    """Create a stable state key from the current Login DTO/session."""
+    session_value = next(
+        (
+            (key, login[key])
+            for key in ("LoginEventLogId", "ValidityOfSession", "SessionId")
+            if login.get(key) not in (None, "", 0, "0")
+        ),
+        None,
+    )
+    identity = (
+        json.dumps(session_value, separators=(",", ":"), default=str)
+        if session_value
+        else json.dumps(login, sort_keys=True, separators=(",", ":"), default=str)
+    )
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()
+
 # Day-type options shown to the user during leave flow
 LEAVE_DAY_TYPE_OPTIONS = [
     {"label": "Full Day",    "value": "FullDay",    "code": "0"},
@@ -231,6 +252,68 @@ def _is_greeting_message(message: str) -> bool:
         "hi there", "hello there", "hey there",
         "good morning", "good afternoon", "good evening",
     }
+
+
+def _extract_leave_date_mentions(message: str) -> List[str]:
+    """Find supported date expressions in a leave request message."""
+    months = (
+        "jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
+        "jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?"
+    )
+    weekdays = "monday|tuesday|wednesday|thursday|friday|saturday|sunday"
+    pattern = re.compile(
+        rf"\b(?:day after tomorrow|tomorrow|tmrw|today|yesterday|"
+        rf"(?:(?:next|last|this)\s+)?(?:{weekdays})|"
+        rf"\d{{4}}[-/]\d{{1,2}}[-/]\d{{1,2}}|"
+        rf"\d{{1,2}}[-/]\d{{1,2}}(?:[-/]\d{{2,4}})?|"
+        rf"\d{{1,2}}(?:st|nd|rd|th)?\s+(?:{months})|"
+        rf"(?:{months})\s+\d{{1,2}}(?:st|nd|rd|th)?)\b",
+        re.IGNORECASE,
+    )
+    return [
+        parsed
+        for match in pattern.finditer(message)
+        if (parsed := _parse_leave_date(match.group(0)))
+    ]
+
+
+def _is_new_leave_application_request(message: str) -> bool:
+    return bool(
+        re.search(r"\bleave\b", message, re.IGNORECASE)
+        and re.search(r"\b(apply|request|take)\b", message, re.IGNORECASE)
+    )
+
+
+def _explicit_leave_slot_value(slot_name: str, value: str, message: str) -> bool:
+    value_words = re.findall(r"\w+", str(value).casefold())
+    message_words = set(re.findall(r"\w+", message.casefold()))
+    if not value_words:
+        return False
+
+    if slot_name == "LeaveType":
+        if _extract_leave_date_mentions(str(value)):
+            return False
+        meaningful_words = [word for word in value_words if word not in {"leave", "type"}]
+        if set(meaningful_words) & {"apply", "request", "take", "want", "need"}:
+            return False
+        return bool(meaningful_words) and all(word in message_words for word in meaningful_words)
+
+    normalized_value = " ".join(value_words)
+    normalized_message = " ".join(re.findall(r"\w+", message.casefold()))
+    if slot_name == "Reason":
+        day_type_values = {
+            " ".join(re.findall(r"\w+", option["label"].casefold()))
+            for option in LEAVE_DAY_TYPE_OPTIONS
+        }
+        if set(value_words) & {"leave", "apply", "request", "take", "want", "need"}:
+            return False
+        if normalized_value in day_type_values:
+            return False
+        if _extract_leave_date_mentions(str(value)):
+            return False
+        return normalized_value in normalized_message
+
+    return False
 
 
 def _is_permission_balance_query(message: str) -> bool:
@@ -843,6 +926,8 @@ def apply_leave_flow(slots, login):
             number_text = f" (Leave No: {leave_number})" if leave_number else ""
             message = f"Leave applied successfully ✅ for {slots.get('EmployeeName')}{number_text}"
         return {"status": "success", "message": message}
+    except LeaveApiError as e:
+        return {"status": "error", "message": str(e)}
     except Exception as e:
         error_msg = str(e)
         if "timed out" in error_msg.lower() or "timeout" in error_msg.lower():
@@ -984,34 +1069,40 @@ def _build_options(records: list, *, label_keys=(), value_keys=(), code_keys=())
 @app.post("/gbaiapi/chat_Interface")
 async def chat(req: ChatRequest, Login: Optional[str] = Header(None)):
     login = parse_login(Login)
-    user_id = str(login.get("UserId", "default"))
+    state_key = _login_state_key(login)
     message = req.message.strip()
 
     _cleanup_expired()
-    _STATE_TS[user_id] = time.time()
+    _STATE_TS[state_key] = time.time()
 
-    PACK_STATE.setdefault(user_id, {"intent": None, "slots": {}, "awaiting": None})
-    LEAVE_STATE.setdefault(user_id, {"intent": None, "slots": {}})
-    TIME_SLIP_STATE.setdefault(user_id, {"intent": None, "slots": {}})
-    ATTENDANCE_STATE.setdefault(user_id, {"intent": None, "slots": {}, "selected_payperiod": None})
-    PURCHASE_STATE.setdefault(user_id, {"intent": None, "slots": {}})
-    TASK_STATE.setdefault(user_id, {"intent": None, "slots": {}, "requester": "", "allocation_split": "", "work_id": None})
-    MENU_STATE.setdefault(user_id, {"active": False})
+    PACK_STATE.setdefault(state_key, {"intent": None, "slots": {}, "awaiting": None})
+    LEAVE_STATE.setdefault(state_key, {"intent": None, "slots": {}})
+    TIME_SLIP_STATE.setdefault(state_key, {"intent": None, "slots": {}})
+    ATTENDANCE_STATE.setdefault(state_key, {"intent": None, "slots": {}, "selected_payperiod": None})
+    PURCHASE_STATE.setdefault(state_key, {"intent": None, "slots": {}})
+    TASK_STATE.setdefault(state_key, {"intent": None, "slots": {}, "requester": "", "allocation_split": "", "work_id": None})
+    MENU_STATE.setdefault(state_key, {"active": False})
 
-    pack_state = PACK_STATE[user_id]
-    leave_state = LEAVE_STATE[user_id]
-    ts_state = TIME_SLIP_STATE[user_id]
-    attendance_state = ATTENDANCE_STATE[user_id]
-    purchase_state = PURCHASE_STATE[user_id]
-    task_state = TASK_STATE[user_id]
-    menu_state = MENU_STATE[user_id]
+    pack_state = PACK_STATE[state_key]
+    leave_state = LEAVE_STATE[state_key]
+    ts_state = TIME_SLIP_STATE[state_key]
+    attendance_state = ATTENDANCE_STATE[state_key]
+    purchase_state = PURCHASE_STATE[state_key]
+    task_state = TASK_STATE[state_key]
+    menu_state = MENU_STATE[state_key]
+
+    # A fresh explicit leave application starts with empty slots instead of
+    # inheriting details from an unfinished request for this user.
+    if leave_state.get("intent") == "apply" and _is_new_leave_application_request(message):
+        leave_state = {"intent": "apply", "slots": {}}
+        LEAVE_STATE[state_key] = leave_state
 
     # ========================================================
     # FIRST MESSAGE GREETING
     # ========================================================
 
     if _is_greeting_message(message):
-        GREETED_USERS.add(user_id)
+        GREETED_USERS.add(state_key)
         try:
             balances = []
             perm_records = []
@@ -1109,7 +1200,8 @@ async def chat(req: ChatRequest, Login: Optional[str] = Header(None)):
     ]):
         root_intent = resolve_intent(message)
         if root_intent == "leave":
-            leave_state["intent"] = "apply"
+            leave_state = {"intent": "apply", "slots": {}}
+            LEAVE_STATE[state_key] = leave_state
         elif root_intent == "time_slip":
             ts_state["intent"] = "apply"
         elif root_intent == "attendance":
@@ -1124,6 +1216,27 @@ async def chat(req: ChatRequest, Login: Optional[str] = Header(None)):
     # ========================================================
 
     if leave_state["intent"] == "apply":
+        if (
+            not leave_state["slots"].get("FromDate")
+            and not leave_state["slots"].get("ToDate")
+        ):
+            single_date = _extract_leave_date_mentions(message)
+            if len(single_date) == 1:
+                leave_state["slots"]["FromDate"] = single_date[0]
+                leave_state["slots"]["ToDate"] = single_date[0]
+            elif len(single_date) > 1:
+                leave_state["slots"]["FromDate"] = single_date[0]
+                leave_state["slots"]["ToDate"] = single_date[-1]
+
+        # Only accept a day type when its label is explicitly in the user's message.
+        normalized_message = " ".join(re.findall(r"\w+", message.casefold()))
+        for day_type in LEAVE_DAY_TYPE_OPTIONS:
+            normalized_label = " ".join(re.findall(r"\w+", day_type["label"].casefold()))
+            if normalized_label and normalized_label in normalized_message:
+                leave_state["slots"]["TLeaveDayType"] = day_type["value"]
+                leave_state["slots"]["TLeaveDayTypeCode"] = day_type["code"]
+                break
+
         is_selection = False
 
         if "last_options" in leave_state:
@@ -1161,7 +1274,10 @@ async def chat(req: ChatRequest, Login: Optional[str] = Header(None)):
                 leave_state.pop("awaiting_field", None)
 
         if not is_selection:
-            has_date_pattern = bool(re.search(r"\d{1,2}[-/]\d{1,2}", message))
+            has_date_pattern = bool(
+                re.search(r"\d{1,2}[-/]\d{1,2}", message)
+                or _extract_leave_date_mentions(message)
+            )
 
             if (
                 leave_state["slots"].get("LeaveType")
@@ -1170,6 +1286,7 @@ async def chat(req: ChatRequest, Login: Optional[str] = Header(None)):
                 and not leave_state["slots"].get("Reason")
                 and message
                 and not has_date_pattern
+                and leave_state.get("awaiting_field") == "Reason"
             ):
                 leave_state["slots"]["Reason"] = message.strip()
             elif leave_state["slots"].get("LeaveType") and not leave_state["slots"].get("FromDate"):
@@ -1189,9 +1306,10 @@ async def chat(req: ChatRequest, Login: Optional[str] = Header(None)):
             else:
                 ai = call_leave_chat(message)
                 slots = normalize_leave_slots(ai["action"]["slots"])
-                for k, v in slots.items():
-                    if v:
-                        leave_state["slots"][k] = v
+                for key in ("LeaveType", "Reason"):
+                    value = slots.get(key)
+                    if value and _explicit_leave_slot_value(key, value, message):
+                        leave_state["slots"][key] = value
 
         leave_state["slots"].setdefault("EmployeeName", login.get("UserName"))
 
@@ -1240,7 +1358,7 @@ async def chat(req: ChatRequest, Login: Optional[str] = Header(None)):
         result = apply_leave_flow(leave_state["slots"], login)
 
         if result.get("status") == "success":
-            LEAVE_STATE.pop(user_id, None)
+            LEAVE_STATE.pop(state_key, None)
 
         return result
 
@@ -1329,7 +1447,7 @@ async def chat(req: ChatRequest, Login: Optional[str] = Header(None)):
         result = apply_time_slip_flow(ts_state["slots"], login)
 
         if result.get("status") == "success":
-            TIME_SLIP_STATE.pop(user_id, None)
+            TIME_SLIP_STATE.pop(state_key, None)
 
         return result
 
@@ -1415,14 +1533,14 @@ async def chat(req: ChatRequest, Login: Optional[str] = Header(None)):
             formatted_attendance = attendance_view.get("message", "")
             attendance_data = attendance_view.get("data", {})
             if formatted_attendance:
-                ATTENDANCE_STATE.pop(user_id, None)
+                ATTENDANCE_STATE.pop(state_key, None)
                 return {"status": "success", "message": formatted_attendance, "attendanceData": attendance_data}
 
             decoded_body = _extract_decoded_service_body(result)
             body_text = _format_service_body(decoded_body)
             message_text = body_text if body_text else "Daily attendance retrieved successfully."
 
-            ATTENDANCE_STATE.pop(user_id, None)
+            ATTENDANCE_STATE.pop(state_key, None)
             return {"status": "success", "message": message_text, "attendanceData": attendance_data}
         except Exception as e:
             error_msg = str(e)
@@ -1560,7 +1678,7 @@ async def chat(req: ChatRequest, Login: Optional[str] = Header(None)):
 
         try:
             result = create_purchase_order(purchase_state["slots"], login)
-            PURCHASE_STATE.pop(user_id, None)
+            PURCHASE_STATE.pop(state_key, None)
             return {"status": "success", "message": "Purchase order created successfully."}
         except Exception as e:
             return {"status": "error", "message": f"Failed to create purchase order: {e}"}
@@ -1710,7 +1828,7 @@ async def chat(req: ChatRequest, Login: Optional[str] = Header(None)):
         result = apply_task_flow(task_state, login)
 
         if result.get("status") == "success":
-            TASK_STATE.pop(user_id, None)
+            TASK_STATE.pop(state_key, None)
 
         return result
 

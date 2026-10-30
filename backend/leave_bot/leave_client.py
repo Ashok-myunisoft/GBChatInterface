@@ -349,6 +349,40 @@ def _get_user_department_details(login: Dict[str, Any]) -> Dict[str, Any]:
 # ============================================================
 # Apply Leave (STRICT PAYLOAD FIX)
 # ============================================================
+class LeaveApiError(Exception):
+    """An API failure whose message should be shown directly to the user."""
+
+
+def _extract_general_errors(value: Any) -> Optional[str]:
+    """Find ERP GeneralErrors messages in direct or nested response bodies."""
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (TypeError, json.JSONDecodeError):
+            return None
+
+    if isinstance(value, list):
+        messages = [str(item) for item in value if item not in (None, "")]
+        return "\n".join(messages) if messages else None
+
+    if not isinstance(value, dict):
+        return None
+
+    errors = value.get("GeneralErrors")
+    if errors:
+        if isinstance(errors, list):
+            messages = [str(item) for item in errors if item not in (None, "")]
+            return "\n".join(messages) if messages else None
+        return str(errors)
+
+    for key in ("Body", "contents", "ResponseObject", "ErrorBody", "Errors"):
+        if key in value:
+            message = _extract_general_errors(value[key])
+            if message:
+                return message
+    return None
+
+
 def apply_leave(slots: Dict[str, Any], login: Dict[str, Any]) -> Dict[str, Any]:
     """Submit leave application with payload strictly matching the provided JSON structure."""
     logger.info("📝 Applying leave...")
@@ -449,9 +483,20 @@ def apply_leave(slots: Dict[str, Any], login: Dict[str, Any]) -> Dict[str, Any]:
         }
         
         response = session.post(url, json=payload, headers=headers, timeout=60)
-        response.raise_for_status()
-        
-        result = response.json()
+        try:
+            result = response.json()
+        except ValueError:
+            result = None
+
+        api_error = _extract_general_errors(result)
+        if api_error:
+            raise LeaveApiError(api_error)
+
+        if not response.ok:
+            response.raise_for_status()
+
+        if result is None:
+            result = response.json()
         logger.info(f"📩 API Response: {json.dumps(result, indent=2)}")
 
         # --- ROBUST ERROR CHECKING ---
