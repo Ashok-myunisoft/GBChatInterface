@@ -1222,8 +1222,24 @@ async def chat(req: ChatRequest, Login: Optional[str] = Header(None)):
         ):
             single_date = _extract_leave_date_mentions(message)
             if len(single_date) == 1:
+                date_expression = (
+                    r"(?:day after tomorrow|tomorrow|tmrw|today|yesterday|"
+                    r"(?:(?:next|last|this)\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)|"
+                    r"\d{4}[-/]\d{1,2}[-/]\d{1,2}|"
+                    r"\d{1,2}[-/]\d{1,2}(?:[-/]\d{2,4})?|"
+                    r"\d{1,2}(?:st|nd|rd|th)?\s+(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
+                    r"jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)|"
+                    r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|"
+                    r"aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+\d{1,2}(?:st|nd|rd|th)?)"
+                )
+                start_date_only = re.search(
+                    rf"\b(?:from|starting(?:\s+on)?)\s+(?:the\s+)?{date_expression}\b",
+                    message,
+                    re.IGNORECASE,
+                )
                 leave_state["slots"]["FromDate"] = single_date[0]
-                leave_state["slots"]["ToDate"] = single_date[0]
+                if not start_date_only:
+                    leave_state["slots"]["ToDate"] = single_date[0]
             elif len(single_date) > 1:
                 leave_state["slots"]["FromDate"] = single_date[0]
                 leave_state["slots"]["ToDate"] = single_date[-1]
