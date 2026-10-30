@@ -1216,6 +1216,7 @@ async def chat(req: ChatRequest, Login: Optional[str] = Header(None)):
     # ========================================================
 
     if leave_state["intent"] == "apply":
+        start_date_only = False
         if (
             not leave_state["slots"].get("FromDate")
             and not leave_state["slots"].get("ToDate")
@@ -1312,7 +1313,12 @@ async def chat(req: ChatRequest, Login: Optional[str] = Header(None)):
                     leave_state["slots"]["FromDate"] = parsed
                 else:
                     return {"status": "success", "message": "Please provide From Date (e.g., Jan 2 or 02-01-2024)."}
-            elif leave_state["slots"].get("LeaveType") and leave_state["slots"].get("FromDate") and not leave_state["slots"].get("ToDate"):
+            elif (
+                leave_state["slots"].get("LeaveType")
+                and leave_state["slots"].get("FromDate")
+                and not leave_state["slots"].get("ToDate")
+                and not start_date_only
+            ):
                 from utils.date_parser import parse_date as _parse_date_direct
                 parsed = _parse_date_direct(message.strip())
                 if parsed:
