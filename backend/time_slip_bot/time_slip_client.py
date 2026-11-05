@@ -36,15 +36,18 @@ try:
         CRITERIA = json.load(f)
     
     LEAVE_REASON_CRITERIA = CRITERIA["LEAVE_REASON_CRITERIA"]
+    SHIFT_ID_CRITERIA = CRITERIA.get("SHIFT_ID_CRITERIA", {})
     logger.info("✓ Criteria loaded successfully from criteria.json")
     
 except FileNotFoundError:
     logger.error("❌ criteria.json file not found!")
     LEAVE_REASON_CRITERIA = {}
+    SHIFT_ID_CRITERIA = {}
 
 except Exception as e:
     logger.error(f"❌ Error loading criteria.json: {e}")
     LEAVE_REASON_CRITERIA = {}
+    SHIFT_ID_CRITERIA = {}
 
 
 # ============================================================
@@ -116,13 +119,29 @@ def clean_section_criteria(section_list: List[Dict]) -> List[Dict]:
     return cleaned
 
 
-def decode_response_body(body_base64: str) -> Dict[str, Any]:
-    """Decode base64 + gzip compressed response body."""
+def decode_response_body(body: str) -> Dict[str, Any]:
+    """Parse a plain JSON response body, with support for legacy gzip wrappers."""
+    if not isinstance(body, str):
+        return {}
+
     try:
-        compressed = base64.b64decode(body_base64)
+        parsed = json.loads(body)
+        if isinstance(parsed, dict):
+            return parsed
+        if isinstance(parsed, list):
+            return {"Body": parsed}
+    except json.JSONDecodeError:
+        pass
+
+    try:
+        compressed = base64.b64decode(body, validate=True)
         decompressed = gzip.decompress(compressed)
-        decoded_str = decompressed.decode("utf-8")
-        return json.loads(decoded_str)
+        parsed = json.loads(decompressed.decode("utf-8"))
+        if isinstance(parsed, dict):
+            return parsed
+        if isinstance(parsed, list):
+            return {"Body": parsed}
+        return {}
     except Exception as e:
         logger.error(f"Decode error: {e}")
         return {}
@@ -207,7 +226,7 @@ def get_time_slip_reasons(login: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Fetch time slip reasons from API using LEAVE_REASON_CRITERIA."""
     logger.info("📋 Fetching time slip reasons from API...")
     try:
-        url = direct_url("/ads/Reason.svc/SelectList", login)
+        url = direct_url("ads/Reason/GetSelectListReason", login)
         
         payload: Dict[str, Any]
         if "SectionCriteriaList" in LEAVE_REASON_CRITERIA:
@@ -254,15 +273,47 @@ def get_employee_shift_id(login: Dict[str, Any]) -> Dict[str, Any]:
             logger.warning("⚠️ UserId not found in login")
             return {"ShiftId": "-1499999997", "ShiftDescription": "General Shift"}
         
-        url = direct_url(f"/prs/Employee.svc/?EmployeeId={employee_id}", login)
+        payload = SHIFT_ID_CRITERIA
+        if not payload:
+            logger.warning("⚠️ SHIFT_ID_CRITERIA not found in criteria.json")
+            return {"ShiftId": "-1499999997", "ShiftDescription": "General Shift"}
+
+        import copy
+        payload = copy.deepcopy(payload)
+        url = direct_url(f"/prs/DailyAttendance.svc/DailyAttendanceEmployeeDetail/?EmployeeId={employee_id}", login)
         
         headers = {"Content-Type": "application/json", "Login": json.dumps(login)}
         session.headers.update({'User-Agent': 'LeaveClient/1.0'})
         
-        response = session.get(url, headers=headers, timeout=60)
+        response = session.post(url, json=payload, headers=headers, timeout=60)
+        if not response.ok:
+            logger.error(
+                "Employee shift lookup API returned status=%s, response_body=%s",
+                response.status_code,
+                response.text,
+            )
         response.raise_for_status()
-        
-        result = parse_api_response(response.json())
+
+        def extract_body_data(response_data):
+            current = response_data
+            while isinstance(current, dict):
+                body = current.get("Body")
+                if body is None and isinstance(current.get("contents"), dict):
+                    body = current["contents"].get("Body")
+                if body is None:
+                    break
+                if isinstance(body, str):
+                    try:
+                        body = json.loads(body)
+                    except json.JSONDecodeError:
+                        decoded = decode_response_body(body)
+                        if not decoded:
+                            break
+                        body = decoded
+                current = body
+            return current if isinstance(current, (list, dict)) else parse_api_response(response_data)
+
+        result = extract_body_data(response.json())
         logger.info(f"🔍 Employee API Result Type: {type(result)}")
         logger.info(f"🔍 Employee API Result: {json.dumps(result, default=str)}")
         
@@ -278,6 +329,28 @@ def get_employee_shift_id(login: Dict[str, Any]) -> Dict[str, Any]:
             shift_desc = employee_data.get("ShiftDescription", "General Shift")
             
             if shift_id:
+                shift_url = direct_url(f"/mms/Shift/GetShift/?ShiftId={shift_id}", login)
+                try:
+                    shift_response = session.get(shift_url, headers=headers, timeout=60)
+                    shift_response.raise_for_status()
+                    shift_result = extract_body_data(shift_response.json())
+                    shift_record = None
+                    if isinstance(shift_result, list) and shift_result:
+                        shift_record = shift_result[0]
+                    elif isinstance(shift_result, dict):
+                        shift_record = shift_result
+
+                    if isinstance(shift_record, dict):
+                        shift_desc = (
+                            shift_record.get("ShiftDescription")
+                            or shift_record.get("ShiftName")
+                            or shift_record.get("Name")
+                            or shift_record.get("Description")
+                            or shift_desc
+                        )
+                except Exception as shift_error:
+                    logger.warning(f"⚠️ Failed to fetch shift details for ShiftId {shift_id}: {shift_error}")
+
                 logger.info(f"✅ Found ShiftId: {shift_id}, ShiftDescription: {shift_desc}")
                 return {"ShiftId": shift_id, "ShiftDescription": shift_desc}
             else:
@@ -421,7 +494,7 @@ def apply_time_slip(slots: Dict[str, Any], login: Dict[str, Any]) -> Dict[str, A
     }
 
     # ---------------- SERVICE CALL ----------------
-    url = direct_url("/prs/TimeSlip.svc/", login)
+    url = direct_url("/prs/TimeSlip/SaveTimeSlip", login)
 
     # Derive Origin and Referer from GB_API_BASE
     parsed_base = urlparse(settings.GB_API_BASE)

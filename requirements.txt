@@ -9,6 +9,7 @@ langchain_community
 ollama
 langchain_openai
 holidays
+psycopg[binary,pool]>=3.2
 mcp[cli]>=1.0.0
 openai>=1.30.0
  

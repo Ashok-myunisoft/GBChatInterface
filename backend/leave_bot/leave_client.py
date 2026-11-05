@@ -6,8 +6,6 @@ Fixed: Payload structure strictly matches the provided JSON sample (TLeaveStatus
 
 import json
 import re
-import uuid
-import calendar
 import gzip
 import base64
 import requests
@@ -17,8 +15,6 @@ import logging
 
 from config import settings
 from utils import map_leave_type_id, map_leave_reason
-from biztransactionid.service import get_biz_transaction_type_id
-from biztransactionid import LEAVE_TRANSACTION_CLASS_ID
 
 
 # ============================================================
@@ -208,31 +204,43 @@ def parse_api_response(response_data: Dict[str, Any]) -> Any:
 # ============================================================
 # Get Leave Types
 # ============================================================
-def get_leave_types(login: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Fetch leave types using criteria."""
-    logger.info("📋 Fetching leave types from API...")
-    try:
-        url = direct_url("prs/Leave/GetSelectListMLeave/?FirstNumber=-1&MaxResult=-1", login)
-        
-        if "SectionCriteriaList" in LEAVE_TYPE_CRITERIA:
-            payload = LEAVE_TYPE_CRITERIA.copy()
-            payload["SectionCriteriaList"] = clean_section_criteria(
-                LEAVE_TYPE_CRITERIA["SectionCriteriaList"]
-            )
-        else:
-            payload = LEAVE_TYPE_CRITERIA
-        
-        headers = {"Content-Type": "application/json", "Login": json.dumps(login)}
-        response = session.post(url, json=payload, headers=headers, timeout=60)
-        response.raise_for_status()
-        
-        result = parse_api_response(response.json())
-        return result if isinstance(result, list) else []
-            
-    except Exception as e:
-        logger.error(f"❌ Error fetching leave types: {e}")
-        return []
+def _run_configured_lookup(terms: tuple[str, ...], login: Dict[str, Any]):
+    """Execute a lookup from the APPLY_LEAVE version's API dependency list."""
+    from capability_engine.dependency_executor import execute_dependency
+    dependency = _find_configured_dependency(terms)
+    raw = execute_dependency(dependency, login=login, inputs={}, session=session,
+                             url_builder=direct_url, timeout=settings.GB_API_TIMEOUT)
+    return raw if isinstance(raw, list) else parse_api_response(raw)
 
+
+def _find_configured_dependency(terms: tuple[str, ...]) -> Dict[str, Any]:
+    from capability_engine.configuration_loader import load_capability
+    config = load_capability("APPLY_LEAVE")
+    for dependency in config["dependencies"]:
+        if not isinstance(dependency, dict):
+            continue
+        identity = " ".join(str(value).casefold() for key, value in dependency.items()
+                            if key.casefold() in {"name", "code", "id", "operation", "dependencyname",
+                                                  "endpoint", "url", "path", "endpointurl", "apiendpoint", "apipath"})
+        if any(term.casefold() in identity for term in terms):
+            return dependency
+    raise RuntimeError(f"No configured dependency found for {'/'.join(terms)}.")
+
+
+def _dependency_setting(dependency: Dict[str, Any], *keys: str):
+    lowered = {str(key).casefold(): value for key, value in dependency.items()}
+    candidates = ("endpoint", "url", "path", "endpointurl", "apiendpoint", "apipath") if keys and keys[0].casefold() == "endpoint" else tuple(key.casefold() for key in keys)
+    return next((lowered[key] for key in candidates if lowered.get(key) is not None), None)
+
+
+def get_leave_types(login: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Fetch Leave Type options through the configured capability dependency."""
+    try:
+        result = _run_configured_lookup(("leave type", "leavetype", "getselectlistmleave"), login)
+        return result if isinstance(result, list) else []
+    except Exception as e:
+        logger.error("Error fetching configured Leave Type dependency: %s", e)
+        return []
 
 def get_leave_types_with_fallback(login: Dict[str, Any]) -> List[Dict[str, Any]]:
     return get_leave_types(login)
@@ -242,31 +250,13 @@ def get_leave_types_with_fallback(login: Dict[str, Any]) -> List[Dict[str, Any]]
 # Get Leave Reasons
 # ============================================================
 def get_leave_reasons(login: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Fetch leave reasons from API."""
-    logger.info("📋 Fetching leave reasons from API...")
+    """Fetch Leave Reason options through the configured capability dependency."""
     try:
-        url = direct_url("ads/Reason/GetSelectListReason", login)
-        
-        if "SectionCriteriaList" in LEAVE_REASON_CRITERIA:
-            payload = LEAVE_REASON_CRITERIA.copy()
-            payload["SectionCriteriaList"] = clean_section_criteria(
-                LEAVE_REASON_CRITERIA["SectionCriteriaList"]
-            )
-        else:
-            payload = LEAVE_REASON_CRITERIA
-            
-        headers = {"Content-Type": "application/json", "Login": json.dumps(login)}
-        response = session.post(url, json=payload, headers=headers, timeout=60)
-        response.raise_for_status()
-        
-        result = parse_api_response(response.json())
+        result = _run_configured_lookup(("leave reason", "leavereason", "getselectlistreason"), login)
         return result if isinstance(result, list) else []
-    
     except Exception as e:
-        logger.error(f"❌ Failed to fetch leave reasons: {e}")
+        logger.error("Error fetching configured Leave Reason dependency: %s", e)
         return []
-
-
 # ============================================================
 # Date Helpers
 # ============================================================
@@ -293,7 +283,14 @@ def _get_user_department_details(login: Dict[str, Any]) -> Dict[str, Any]:
     if user_id is None:
         raise ValueError("UserId not found in login DTO")
 
-    url = direct_url("fws/User/GetUser/", login)
+    dependency = _find_configured_dependency(("employee details", "getuser", "employee lookup"))
+    method = str(_dependency_setting(dependency, "method", "httpmethod", "requestmethod") or "GET").upper()
+    if method != "GET":
+        raise ValueError("The configured employee details dependency must use GET.")
+    endpoint = _dependency_setting(dependency, "endpoint", "url", "path", "endpointurl", "apiendpoint")
+    if not endpoint:
+        raise ValueError("The configured employee details dependency has no endpoint.")
+    url = direct_url(endpoint, login)
     headers = {"Content-Type": "application/json", "Login": json.dumps(login)}
     response = session.get(
         url,
@@ -384,169 +381,103 @@ def _extract_general_errors(value: Any) -> Optional[str]:
 
 
 def apply_leave(slots: Dict[str, Any], login: Dict[str, Any]) -> Dict[str, Any]:
-    """Submit leave application with payload strictly matching the provided JSON structure."""
-    logger.info("📝 Applying leave...")
-    
-    try:
-        from_dt = _parse_date(slots.get("FromDate"))
-        to_dt = _parse_date(slots.get("ToDate"))
-        
-        if not from_dt or not to_dt:
-            raise Exception("Invalid dates provided")
-        
-        days = (to_dt - from_dt).days + 1
-        if days <= 0:
-            raise Exception(f"Invalid date range: {days} days")
-        
-        # Prepare Data Mapping
-        emp_id = str(login["UserId"])
-        emp_name = login.get("UserName", "")
-        
-        leave_type_id = slots.get("LeaveTypeId") or map_leave_type_id(slots.get("LeaveType"))
-        # Use the name provided in slots, or default to empty string if missing
-        leave_type_name = slots.get("LeaveType", "")
-        
-        # Use the ReasonId/Reason already set by the selection flow.
-        # Fall back to the static map only if the slot is missing.
-        reason_id = slots.get("ReasonId") or None
-        reason_name = slots.get("Reason") or ""
-        if not reason_id:
-            mapped_id, mapped_name = map_leave_reason(slots.get("Reason"))
-            reason_id = mapped_id
-            if mapped_name:
-                reason_name = mapped_name
-        if reason_id is not None:
-            reason_id = int(reason_id)
-        
-        biz_type_id = get_biz_transaction_type_id(LEAVE_TRANSACTION_CLASS_ID, login)
-        department_details = _get_user_department_details(login)
-        
-        # Get Day Name (e.g., "Monday")
-        day_name = from_dt.strftime("%A")
+    """Submit leave application after building from the active DB configuration."""
+    return submit_leave_payload(prepare_leave_payload(slots, login), login)
 
-        # --- BUILD PAYLOAD STRICTLY MATCHING YOUR JSON SAMPLE ---
-        payload = {
-            "BizTransactionTypeId": biz_type_id,
-            **department_details,
-            "EmployeeCode": login["UserCode"],
-            "EmployeeId": login["UserId"],
-            "EmployeeName": emp_name,
-            "GuId": str(uuid.uuid4()),
-            "MenuBasedResponce": 0,
-            "OUCode":login["OuCode"],
-            "OUId": login["WorkOUId"],
-            "OUName":login["OuName"],
-            "PeriodId": login["WorkPeriodId"],
-            "ReasonId": reason_id,
-            "ReasonName":reason_name,
-            "TAvailabeLeave": "0",
-            "TLeaveCreatedById": login["UserId"],
-            "TLeaveCreatedOn": login["LoginServerDate"],
-            "TLeaveDayType": slots.get("TLeaveDayType", "FullDay"),
-            "TLeaveDetailArray": [
-                {
-                    "DayType": slots.get("TLeaveDayTypeCode", "0"),
-                    "EmployeeCode": login.get("UserCode", ""),
-                    "EmployeeId": emp_id,
-                    "EmployeeName": emp_name,
-                    "LeaveDayName": day_name,
-                    "LeaveTypeId": leave_type_id,
-                    "TLeaveDetailLeaveDate": _gb_date(from_dt),
-                    "TLeaveDetailLeaveDayType": int(slots.get("TLeaveDayTypeCode", 0)),
-                    "TLeaveDetailNumberOfDays": float(days),
-                    "TLeaveDetailSlNo": 1,
-                    "TLeaveDetailValidTill": _gb_date(to_dt)
-                }
-            ],
-            "TLeaveId": 0,
-            "TLeaveLeaveDate": _gb_date(from_dt),
-            "TLeaveLeaveNumber": "0",
-            "TLeaveModifiedById": login["UserId"],
-            "TLeaveModifiedOn": login["LoginServerDate"],
-            "TLeaveNumberOfDays": float(days),
-            "TLeaveReferenceDate": _gb_date(from_dt),
-            "TLeaveReferenceNumber": "0",
-            "TLeaveRemarks": reason_name,
-            "TLeaveStatus": 0,
-            "TLeaveType": leave_type_name,
-            "TLeaveVersion": 1
-        }
-        
-        logger.info(f"🚀 Submitting Leave Payload: {json.dumps(payload, indent=2)}")
-        
-        # Use HMS endpoint (Correction from previous issue)
-        url = direct_url("prs/TLeave/SaveTLeave/", login)
-        
-        headers = {
-            "Content-Type": "application/json",
-            "Login": json.dumps(login)
-        }
-        
+
+def prepare_leave_payload(slots: Dict[str, Any], login: Dict[str, Any]) -> Dict[str, Any]:
+    """Load APPLY_LEAVE configuration, validate inputs, and dynamically build payload."""
+    from_dt = _parse_date(slots.get("FromDate"))
+    to_dt = _parse_date(slots.get("ToDate"))
+    if not from_dt or not to_dt:
+        raise ValueError("Invalid dates provided")
+    days = (to_dt - from_dt).days + 1
+    if days <= 0:
+        raise ValueError(f"Invalid date range: {days} days")
+    values = dict(slots)
+    values["NumberOfDays"] = float(days)
+    if not values.get("LeaveTypeId"):
+        values["LeaveTypeId"] = map_leave_type_id(values.get("LeaveType"))
+    if not values.get("ReasonId"):
+        reason_id, reason_name = map_leave_reason(values.get("Reason"))
+        if reason_id:
+            values["ReasonId"] = reason_id
+            values["Reason"] = reason_name or values.get("Reason", "")
+    if values.get("ReasonId") not in (None, ""):
+        values["ReasonId"] = int(values["ReasonId"])
+    department_details = _get_user_department_details(login)
+    from capability_engine.capability_executor import prepare_apply_leave
+    payload, _ = prepare_apply_leave(values, login, department_details)
+    return payload
+
+
+def submit_leave_payload(payload: Dict[str, Any], login: Dict[str, Any]) -> Dict[str, Any]:
+    """Execute Save Leave for a payload that has already been confirmed."""
+    logger.info("Submitting confirmed leave application.")
+    try:
+        # Keep direct_url as the URL builder; use the endpoint from this DB version.
+        dependency = _find_configured_dependency(("save leave", "save tleave", "savetleave", "apply leave"))
+        method = str(_dependency_setting(dependency, "method", "httpmethod", "requestmethod") or "POST").upper()
+        if method != "POST":
+            raise ValueError("The configured Save Leave dependency must use POST.")
+        endpoint = _dependency_setting(dependency, "endpoint", "url", "path", "endpointurl", "apiendpoint")
+        if not endpoint:
+            raise ValueError("The configured Save Leave dependency has no endpoint.")
+        url = direct_url(endpoint, login)
+        headers = {"Content-Type": "application/json", "Login": json.dumps(login)}
         response = session.post(url, json=payload, headers=headers, timeout=60)
         try:
             result = response.json()
         except ValueError:
             result = None
-
         api_error = _extract_general_errors(result)
         if api_error:
             raise LeaveApiError(api_error)
-
         if not response.ok:
             response.raise_for_status()
-
         if result is None:
             result = response.json()
-        logger.info(f"📩 API Response: {json.dumps(result, indent=2)}")
+        logger.info("Save Leave API response received.")
 
-        # --- ROBUST ERROR CHECKING ---
-        if "status" in result and isinstance(result["status"], dict):
+        if isinstance(result, dict) and isinstance(result.get("status"), dict):
             http_code = result["status"].get("http_code")
             if http_code and http_code != 200:
                 raise Exception(f"Server returned error {http_code}. The endpoint {url} might be incorrect.")
-
-        if "contents" in result and isinstance(result["contents"], str):
+        if isinstance(result, dict) and isinstance(result.get("contents"), str):
             raw_content = result["contents"]
             if "\r\n\r\n" in raw_content:
                 try:
-                    json_part = raw_content.split("\r\n\r\n", 1)[1]
-                    inner_data = json.loads(json_part)
+                    inner_data = json.loads(raw_content.split("\r\n\r\n", 1)[1])
                     inner_status = inner_data.get("Status")
                     if inner_status and inner_status != 200:
                         raise Exception(f"API Error: {inner_data.get('Body')} (Status: {inner_status})")
                 except json.JSONDecodeError:
                     pass
-
-        if isinstance(result, dict):
-            status_val = result.get("Status")
-            if status_val in ("Failed", 400, 412, 405):
-                decoded = {}
-                body_raw = result.get("Body") or (result.get("contents") or {}).get("Body", "")
-                if isinstance(body_raw, str) and body_raw:
+        if isinstance(result, dict) and result.get("Status") in ("Failed", 400, 412, 405):
+            decoded = {}
+            body_raw = result.get("Body") or (result.get("contents") or {}).get("Body", "")
+            if isinstance(body_raw, str) and body_raw:
+                try:
+                    decoded = decode_response_body(body_raw)
+                except Exception:
+                    pass
+            error_msg = ""
+            if decoded:
+                inner = decoded.get("Body", "")
+                if isinstance(inner, str):
                     try:
-                        decoded = decode_response_body(body_raw)
+                        inner_parsed = json.loads(inner)
+                        error_msg = inner_parsed.get("Body", "") if isinstance(inner_parsed, dict) else inner
                     except Exception:
-                        pass
-                error_msg = ""
-                if decoded:
-                    inner = decoded.get("Body", "")
-                    if isinstance(inner, str):
-                        try:
-                            inner_parsed = json.loads(inner)
-                            error_msg = inner_parsed.get("Body", "") if isinstance(inner_parsed, dict) else inner
-                        except Exception:
-                            error_msg = inner
-                if not error_msg:
-                    error_msg = result.get("Body", "Leave could not be applied.")
-                raise Exception(error_msg)
-
-        logger.info("✅ Leave application submitted successfully")
+                        error_msg = inner
+            if not error_msg:
+                error_msg = result.get("Body", "Leave could not be applied.")
+            raise Exception(error_msg)
+        logger.info("Leave application submitted successfully.")
         return result
-    
     except Exception as e:
-        logger.error(f"❌ Leave application failed: {e}")
+        logger.error("Leave application failed: %s", e)
         raise
-
 # ============================================================
 # Get Leave Balance (LeaveStatusReport)
 # ============================================================

@@ -81,6 +81,30 @@
       }
     ]
   },
+  "SHIFT_ID_CRITERIA": {
+    "SectionCriteriaList": [
+      {
+        "SectionId": 0,
+        "AttributesCriteriaList": [
+          {
+            "FieldName": "PeriodFromDate",
+            "OperationType": 10,
+            "FieldValue": " ",
+            "InArray": null,
+            "JoinType": 2
+          },
+          {
+            "FieldName": "PeriodToDate",
+            "OperationType": 11,
+            "FieldValue": " ",
+            "InArray": null,
+            "JoinType": 2
+          }
+        ],
+        "OperationType": 1
+      }
+    ]
+  },
   "LEAVE_BALANCE_CRITERIA": {
     "CriteriaDTO": {
       "SectionCriteriaList": [
