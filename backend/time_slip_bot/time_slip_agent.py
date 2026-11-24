@@ -140,11 +140,32 @@ def regex_extract(text: str):
 # SLOT NORMALIZATION (USED IN main.py)
 # ============================================================
 
+def _normalize_time(value: str) -> str:
+    """Convert an extracted clock time to 24-hour HH:MM, preserving 24-hour input."""
+    text = str(value or "").strip()
+    match = re.fullmatch(r"(\d{1,2}):([0-5]\d)\s*(AM|PM)?", text, re.IGNORECASE)
+    if not match:
+        return text
+
+    hour = int(match.group(1))
+    minute = match.group(2)
+    meridiem = match.group(3)
+    if meridiem:
+        if not 1 <= hour <= 12:
+            return text
+        hour %= 12
+        if meridiem.upper() == "PM":
+            hour += 12
+    elif hour > 23:
+        return text
+    return f"{hour:02d}:{minute}"
+
+
 def normalize_time_slip_slots(s: dict):
     return {
         "TimeSlipDate": parse_date(s.get("TimeSlipDate", "")) or "",
-        "FromTime": s.get("FromTime", "").strip(),
-        "ToTime": s.get("ToTime", "").strip(),
+        "FromTime": _normalize_time(s.get("FromTime", "")),
+        "ToTime": _normalize_time(s.get("ToTime", "")),
         "Duration": s.get("Duration", "").strip(),
         "TimeSlipReason": s.get("TimeSlipReason", "").strip(),
         "PermissionReason": s.get("PermissionReason", "").strip(),

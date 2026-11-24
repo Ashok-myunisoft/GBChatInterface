@@ -3,8 +3,11 @@ from __future__ import annotations
 
 import json
 
+_UNSET = object()
 
-def execute_dependency(dependency: dict, *, login: dict, inputs: dict, session, url_builder, timeout: int = 60):
+
+def execute_dependency(dependency: dict, *, login: dict, inputs: dict, session, url_builder,
+                      timeout: int = 60, json_body=_UNSET):
     """Execute a configured API dependency using the existing URL builder."""
     normalize = lambda key: "".join(ch for ch in str(key).casefold() if ch.isalnum())
     lowered = {normalize(k): v for k, v in dependency.items()}
@@ -20,13 +23,18 @@ def execute_dependency(dependency: dict, *, login: dict, inputs: dict, session, 
             body = json.loads(body)
         except json.JSONDecodeError:
             pass
+    request_body = resolve_template(body, login, inputs) if body is not None else None
+    if json_body is not _UNSET:
+        request_body = json_body
     response = session.request(
         method, url_builder(endpoint, login), headers=headers,
         params=resolve_template(params, login, inputs),
-        json=resolve_template(body, login, inputs) if body is not None else None,
+        json=request_body,
         timeout=timeout,
     )
     response.raise_for_status()
+    if response.status_code == 204 or not response.content:
+        return None
     return response.json()
 
 

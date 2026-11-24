@@ -208,8 +208,24 @@ def _calculate_days(from_date: str, to_date: str) -> str:
 
 
 def _extract_time(text: str):
-    m = re.search(r"\b([01]?\d|2[0-3]):[0-5]\d\b", text)
-    return m.group(0) if m else None
+    m = re.search(r"\b(\d{1,2}):([0-5]\d)\s*(AM|PM)?\b", text, re.IGNORECASE)
+    if not m:
+        return None
+
+    hour = int(m.group(1))
+    minute = m.group(2)
+    meridiem = m.group(3)
+
+    if meridiem:
+        if not 1 <= hour <= 12:
+            return None
+        hour %= 12
+        if meridiem.upper() == "PM":
+            hour += 12
+    elif hour > 23:
+        return None
+
+    return f"{hour:02d}:{minute}"
 
 
 _BALANCE_KEYWORDS = ["balance", "available", "remaining", "left", "how many"]

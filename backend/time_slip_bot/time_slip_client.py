@@ -1,13 +1,10 @@
-from urllib.parse import urlparse
 import requests
 import json
-import uuid
 import re
 from datetime import datetime, timedelta
 from typing import Dict, Any, List
 
 from config import settings
-from utils import map_leave_reason
 
 # ✅ BizTransaction
 from biztransactionid.service import get_biz_transaction_type_id
@@ -17,7 +14,6 @@ from biztransactionid import TIME_SLIP_TRANSACTION_CLASS_ID
 import logging
 import gzip
 import base64
-import calendar
 
 # ============================================================
 # Logging Configuration
@@ -70,7 +66,7 @@ def _parse_date(val: str) -> datetime:
     # If it's already in ERP format, extract it
     if "/Date(" in val:
         try:
-            ts = int(re.search(r"\d+", val).group()) / 1000
+            ts = int(re.search(r"-?\d+", val).group()) / 1000
             return datetime.fromtimestamp(ts)
         except Exception:
             pass
@@ -97,27 +93,6 @@ def _parse_date(val: str) -> datetime:
 # ============================================================
 # HELPER FUNCTIONS (Copied from leave_client.py)
 # ============================================================
-
-def clean_section_criteria(section_list: List[Dict]) -> List[Dict]:
-    """Remove empty or null values from criteria to prevent API errors."""
-    cleaned = []
-    
-    for section in section_list:
-        attrs = []
-        for attribute in section.get("AttributesCriteriaList", []):
-            field_value = attribute.get("FieldValue")
-            
-            if field_value is None: continue
-            if isinstance(field_value, str) and field_value.strip() == "": continue
-            
-            attrs.append(attribute)
-        
-        cleaned_section = dict(section)
-        cleaned_section["AttributesCriteriaList"] = attrs
-        cleaned.append(cleaned_section)
-    
-    return cleaned
-
 
 def decode_response_body(body: str) -> Dict[str, Any]:
     """Parse a plain JSON response body, with support for legacy gzip wrappers."""
@@ -198,11 +173,6 @@ def parse_api_response(response_data: Dict[str, Any]) -> Any:
 # TIME HELPERS
 # ============================================================
 
-def _to_minutes(hhmm: str) -> int:
-    h, m = map(int, hhmm.split(":"))
-    return h * 60 + m
-
-
 def _duration_minutes(from_time: str, to_time: str) -> int | None:
     try:
         start = datetime.strptime(from_time.strip(), "%H:%M")
@@ -222,40 +192,228 @@ def _duration_minutes(from_time: str, to_time: str) -> int | None:
 # GET REASONS (Similar to leave_client.py)
 # ============================================================
 
+# ============================================================
+# DATABASE-DRIVEN APPLY_PERMISSION
+# ============================================================
+
+def _permission_dependency(config: Dict[str, Any], operation: str) -> Dict[str, Any]:
+    terms = ("reason", "lookup") if operation == "lookup" else ("save", "permission")
+    for dependency in config.get("dependencies", []):
+        if not isinstance(dependency, dict):
+            continue
+        identity = " ".join(str(value).casefold() for key, value in dependency.items()
+                            if key.casefold() in {"name", "code", "id", "operation", "dependencyname",
+                                                  "endpoint", "url", "path", "endpointurl", "apiendpoint", "apipath"})
+        if all(term in identity for term in terms):
+            return dependency
+    raise RuntimeError(f"No configured Permission {operation} dependency was found.")
+
+
+def _execute_permission_lookup(login: Dict[str, Any], slots: Dict[str, Any] | None = None):
+    from capability_engine.configuration_loader import load_capability
+    from capability_engine.dependency_executor import execute_dependency
+    config = load_capability("APPLY_PERMISSION")
+    raw = execute_dependency(_permission_dependency(config, "lookup"), login=login, inputs=slots or {},
+                             session=session, url_builder=direct_url, timeout=60)
+    return raw if isinstance(raw, list) else parse_api_response(raw) if isinstance(raw, dict) else []
+
+
+def _employee_details_dependency(config: Dict[str, Any]) -> Dict[str, Any]:
+    for dependency in config.get("dependencies", []):
+        if isinstance(dependency, dict) and dependency.get("code") == "EMPLOYEE_DETAILS_LOOKUP":
+            return dependency
+    raise RuntimeError("APPLY_PERMISSION has no EMPLOYEE_DETAILS_LOOKUP dependency configured.")
+
+
+def _employee_response_data(raw: Any) -> Any:
+    """Unwrap common ERP envelopes and JSON-encoded Body values."""
+    current = raw
+    for _ in range(8):
+        if isinstance(current, str):
+            try:
+                current = json.loads(current)
+                continue
+            except (TypeError, json.JSONDecodeError):
+                decoded = decode_response_body(current)
+                if decoded:
+                    current = decoded
+                    continue
+                break
+        if isinstance(current, dict):
+            next_value = None
+            found = False
+            for key in ("Body", "contents", "ResponseObject", "Data"):
+                if key in current:
+                    next_value = current[key]
+                    found = True
+                    break
+            if found:
+                current = next_value
+                continue
+        break
+    if isinstance(current, list):
+        return current[0] if current and isinstance(current[0], dict) else current
+    return current
+
+
+def _configured_employee_response(raw: Any, dependency: Dict[str, Any]) -> Dict[str, Any]:
+    data = _employee_response_data(raw)
+    if not isinstance(data, dict):
+        raise ValueError("EMPLOYEE_DETAILS_LOOKUP returned no usable employee detail object.")
+    mapping = next((value for key, value in dependency.items()
+                    if key.casefold() == "response_mapping"), None)
+    if isinstance(mapping, str):
+        try:
+            mapping = json.loads(mapping)
+        except json.JSONDecodeError as exc:
+            raise ValueError("EMPLOYEE_DETAILS_LOOKUP response_mapping is invalid JSON.") from exc
+    if isinstance(mapping, list):
+        normalized = {}
+        for item in mapping:
+            if not isinstance(item, dict):
+                continue
+            target = next((v for k, v in item.items() if k.casefold() in {"target", "targetfield", "field", "name"}), None)
+            source = next((v for k, v in item.items() if k.casefold() in {"source", "sourcefield", "sourcepath", "path"}), None)
+            if target and source:
+                normalized[str(target)] = source
+        mapping = normalized
+    if not isinstance(mapping, dict):
+        raise ValueError("EMPLOYEE_DETAILS_LOOKUP has no valid response_mapping configured.")
+
+    result = {}
+    for target in ("DepartmentCode", "DepartmentId", "DepartmentName", "EmployeeCode"):
+        source = next((value for key, value in mapping.items() if str(key).casefold() == target.casefold()), None)
+        if isinstance(source, dict):
+            source = next((value for key, value in source.items()
+                           if key.casefold() in {"source", "sourcefield", "sourcepath", "path"}), None)
+        if not source:
+            raise ValueError(f"EMPLOYEE_DETAILS_LOOKUP response_mapping is missing {target}.")
+        value = data
+        for part in str(source).replace("$.", "").split("."):
+            if isinstance(value, dict) and part in value:
+                value = value[part]
+            else:
+                value = None
+                break
+        if value in (None, ""):
+            raise ValueError(f"EMPLOYEE_DETAILS_LOOKUP response is missing required value for {target} (source {source}).")
+        result[target] = value
+    return result
+
+
+def _execute_employee_details_lookup(config: Dict[str, Any], login: Dict[str, Any]) -> Dict[str, Any]:
+    from capability_engine.dependency_executor import execute_dependency
+    dependency = _employee_details_dependency(config)
+    raw = execute_dependency(dependency, login=login, inputs={}, session=session,
+                             url_builder=direct_url, timeout=60)
+    return _configured_employee_response(raw, dependency)
+
+
 def get_time_slip_reasons(login: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Fetch time slip reasons from API using LEAVE_REASON_CRITERIA."""
-    logger.info("📋 Fetching time slip reasons from API...")
+    """Fetch Permission reasons using the configured criteria without changing them."""
     try:
-        url = direct_url("ads/Reason/GetSelectListReason", login)
-        
-        payload: Dict[str, Any]
-        if "SectionCriteriaList" in LEAVE_REASON_CRITERIA:
-            payload = LEAVE_REASON_CRITERIA.copy()
-            payload["SectionCriteriaList"] = clean_section_criteria(
-                LEAVE_REASON_CRITERIA["SectionCriteriaList"]
-            )
-        else:
-            payload = LEAVE_REASON_CRITERIA
-            
-        # Use requests.Session (same as leave_client.py)
-        # Use exact matching User-Agent just in case server logic depends on it
-        headers = {"Content-Type": "application/json", "Login": json.dumps(login)}
-        session.headers.update({'User-Agent': 'LeaveClient/1.0'})
-        
-        # Debug logging
-        logger.info(f"🔍 URL: {url}")
-        logger.info(f"🔍 Login keys: {list(login.keys())}")
-        logger.info(f"🔍 Payload: {json.dumps(payload)}")
-        
-        response = session.post(url, json=payload, headers=headers, timeout=60)
-        response.raise_for_status()
-        
-        result = parse_api_response(response.json())
+        result = _execute_permission_lookup(login)
         return result if isinstance(result, list) else []
-    
-    except Exception as e:
-        logger.error(f"❌ Failed to fetch time slip reasons: {e}")
+    except Exception as exc:
+        logger.error("Failed to fetch configured Permission reasons: %s", exc)
         return []
+
+
+def apply_time_slip(slots: Dict[str, Any], login: Dict[str, Any]) -> Dict[str, Any]:
+    """Run APPLY_PERMISSION through configured validation, mappings, and dependencies."""
+    from capability_engine.capability_executor import prepare_apply_permission
+    from capability_engine.configuration_loader import load_capability
+    from capability_engine.dependency_executor import execute_dependency
+
+    config = load_capability("APPLY_PERMISSION")
+    date = _parse_date(slots.get("TimeSlipDate"))
+    from_time = str(slots.get("FromTime", "")).strip()
+    to_time = str(slots.get("ToTime", "")).strip()
+    duration = _duration_minutes(from_time, to_time)
+    if duration is None or duration <= 0:
+        raise ValueError("Invalid From Time / To Time range")
+    reason_input = str(slots.get("TimeSlipReason", "")).strip()
+    if not reason_input:
+        raise ValueError("TimeSlipReason is required.")
+    reasons = _execute_permission_lookup(login, dict(slots))
+    selected = reason_input.casefold()
+    reason = next((item for item in reasons if isinstance(item, dict) and
+                   str(item.get("Name", "")).strip().casefold() == selected), None)
+    if not reason or reason.get("Id") in (None, ""):
+        raise ValueError(f"Permission reason '{reason_input}' was not found in the ERP reason list.")
+
+    shift_data = get_employee_shift_id(login)
+    managed = {
+        "BizTransactionTypeId": get_biz_transaction_type_id(TIME_SLIP_TRANSACTION_CLASS_ID, login),
+        "ShiftId": shift_data.get("ShiftId", "-1499999997"),
+        "ShiftDescription": shift_data.get("ShiftDescription", "General Shift"),
+    }
+    values = dict(slots)
+    values.update({"TimeSlipDate": date.strftime("%Y-%m-%d"), "FromTime": from_time, "ToTime": to_time})
+    api_responses = _execute_employee_details_lookup(config, login)
+    payload, _ = prepare_apply_permission(values, login,
+                                          {"Id": reason["Id"], "Name": reason.get("Name", "")}, managed,
+                                          api_responses=api_responses)
+
+    # Keep the existing duration field; the configured computations populate
+    # the mapped TimeSlipTimeSlipStartTime and TimeSlipTimeSlipEndTime fields.
+    payload.setdefault("TimeSlipDuration", duration)
+
+    def collect_time_fields(value, path=""):
+        found = {}
+        if isinstance(value, dict):
+            for key, child in value.items():
+                child_path = f"{path}.{key}" if path else str(key)
+                found.update(collect_time_fields(child, child_path))
+        elif isinstance(value, list):
+            for index, child in enumerate(value):
+                found.update(collect_time_fields(child, f"{path}[{index}]"))
+        elif "time" in path.casefold():
+            found[path] = value
+        return found
+
+    logger.info(
+        "Permission time values: input_from=%s, input_to=%s, duration_minutes=%s, payload_time_fields=%s",
+        from_time,
+        to_time,
+        duration,
+        json.dumps(collect_time_fields(payload), default=str),
+    )
+
+    save_dependency = _permission_dependency(config, "save")
+    method = next((str(value).upper() for key, value in save_dependency.items()
+                   if key.casefold() in {"method", "httpmethod", "requestmethod"}), "POST")
+    if method != "POST":
+        raise ValueError("The configured Save Permission dependency must use POST.")
+    logger.info("Permission request payload: %s", json.dumps(payload, default=str, ensure_ascii=False))
+    try:
+        raw = execute_dependency(save_dependency, login=login, inputs=values,
+                                 session=session, url_builder=direct_url, timeout=60, json_body=payload)
+    except requests.HTTPError as exc:
+        response = exc.response
+        if response is None:
+            raise
+        response_body = response.text
+        logger.error("Permission submission HTTP failure: status=%s, response_body=%s",
+                     response.status_code, response_body)
+        raise RuntimeError(
+            f"Permission submission failed with HTTP {response.status_code}: {response_body}"
+        ) from exc
+    if isinstance(raw, dict):
+        status = raw.get("Status")
+        nested_status = raw.get("status")
+        if status not in (None, 200, "200", "Success", "success"):
+            raise RuntimeError(f"Permission submission failed: {raw.get('Body') or status}")
+        if isinstance(nested_status, dict) and nested_status.get("http_code") not in (None, 200, "200"):
+            raise RuntimeError(f"Permission submission failed: {nested_status}")
+    parsed = parse_api_response(raw) if isinstance(raw, dict) else raw
+    number = None
+    if isinstance(parsed, list) and parsed and isinstance(parsed[0], dict):
+        number = parsed[0].get("TimeSlipNumber")
+    elif isinstance(parsed, dict):
+        number = parsed.get("TimeSlipNumber")
+    return {"permission_number": number, "body": raw, "status_code": 200}
+
 
 # ============================================================
 # GET EMPLOYEE SHIFT ID
@@ -280,7 +438,14 @@ def get_employee_shift_id(login: Dict[str, Any]) -> Dict[str, Any]:
 
         import copy
         payload = copy.deepcopy(payload)
-        url = direct_url(f"/prs/DailyAttendance.svc/DailyAttendanceEmployeeDetail/?EmployeeId={employee_id}", login)
+        for section in payload.get("SectionCriteriaList", []):
+            for attribute in section.get("AttributesCriteriaList", []):
+                field_name = attribute.get("FieldName")
+                if field_name == "PeriodFromDate":
+                    attribute["FieldValue"] = login.get("WorkPeriodFromDate", "")
+                elif field_name == "PeriodToDate":
+                    attribute["FieldValue"] = login.get("WorkPeriodToDate", "")
+        url = direct_url(f"/prs/DailyAttendance/GetDailyAttendanceEmployeeDetail/?EmployeeId={employee_id}", login)
         
         headers = {"Content-Type": "application/json", "Login": json.dumps(login)}
         session.headers.update({'User-Agent': 'LeaveClient/1.0'})
@@ -329,29 +494,7 @@ def get_employee_shift_id(login: Dict[str, Any]) -> Dict[str, Any]:
             shift_desc = employee_data.get("ShiftDescription", "General Shift")
             
             if shift_id:
-                shift_url = direct_url(f"/mms/Shift/GetShift/?ShiftId={shift_id}", login)
-                try:
-                    shift_response = session.get(shift_url, headers=headers, timeout=60)
-                    shift_response.raise_for_status()
-                    shift_result = extract_body_data(shift_response.json())
-                    shift_record = None
-                    if isinstance(shift_result, list) and shift_result:
-                        shift_record = shift_result[0]
-                    elif isinstance(shift_result, dict):
-                        shift_record = shift_result
-
-                    if isinstance(shift_record, dict):
-                        shift_desc = (
-                            shift_record.get("ShiftDescription")
-                            or shift_record.get("ShiftName")
-                            or shift_record.get("Name")
-                            or shift_record.get("Description")
-                            or shift_desc
-                        )
-                except Exception as shift_error:
-                    logger.warning(f"⚠️ Failed to fetch shift details for ShiftId {shift_id}: {shift_error}")
-
-                logger.info(f"✅ Found ShiftId: {shift_id}, ShiftDescription: {shift_desc}")
+                logger.info("Using attendance shift details: ShiftId=%s, ShiftDescription=%s", shift_id, shift_desc)
                 return {"ShiftId": shift_id, "ShiftDescription": shift_desc}
             else:
                  logger.warning("⚠️ ShiftId missing in employee data")
@@ -383,191 +526,6 @@ def direct_url(path: str, login: Dict[str, Any] = None) -> str:
 
 # ============================================================
 # APPLY TIME SLIP (✅ FIXED)
-# ============================================================
-
-def apply_time_slip(slots: Dict[str, Any], login: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Save a time slip and preserve both the raw response body and the extracted
-    permission number for the caller.
-    """
-
-    # ---------------- DATE ----------------
-    date = _parse_date(slots.get("TimeSlipDate"))
-    gb_date = f"/Date({int(date.timestamp() * 1000)})/"
-
-    # ---------------- TIME ----------------
-    from_time = slots.get("FromTime")
-    to_time = slots.get("ToTime")
-
-    duration = _duration_minutes(from_time, to_time)
-    if duration is None:
-        raise ValueError("Invalid From Time / To Time range")
-
-    # ---------------- REASON ----------------
-    user_reason_input = slots.get("TimeSlipReason")
-    reason_id = None
-    reason_name = user_reason_input
-
-    try:
-        # 1. Try dynamic fetch from API
-        api_reasons = get_time_slip_reasons(login)
-        normalized_input = (user_reason_input or "").strip().lower()
-
-        for r in api_reasons:
-            # Check 'Name' field from API response
-            if r.get("Name", "").strip().lower() == normalized_input:
-                reason_id = r.get("Id")
-                reason_name = r.get("Name")
-                break
-    except Exception:
-        # Fallback if fetch fails
-        pass
-
-    # 2. Fallback to static map if not found in API
-    if not reason_id:
-        mapped_id, mapped_name = map_leave_reason(user_reason_input)
-        if mapped_id:
-            reason_id = mapped_id
-            reason_name = mapped_name
-
-    # ---------------- EMPLOYEE ----------------
-    emp_id = login.get("UserId")
-    emp_name = login.get("UserName")
-    emp_code = login.get("UserCode")
-    
-    # ---------------- SHIFT (Dynamic Fetch) ----------------
-    shift_data = get_employee_shift_id(login)
-    shift_id = shift_data.get("ShiftId", "-1499999997")
-    shift_description = shift_data.get("ShiftDescription", "General Shift")
-
-    # ---------------- BIZ TRANSACTION ----------------
-    biz_transaction_type_id = get_biz_transaction_type_id(
-        TIME_SLIP_TRANSACTION_CLASS_ID,
-        login
-    )
-
-    # ---------------- PAYLOAD ----------------
-    payload = {
-        "TimeSlipId": 0,
-        "BizTransactionTypeId": biz_transaction_type_id,
-        "OrganizationUnitId": login.get("WorkOUId"),
-        "PeriodId": login.get("WorkPeriodId"),
-        "TimeSlipNumber": 0,
-
-        "TimeSlipDate": gb_date,
-        "TimeSlipAttendanceDate": gb_date,
-
-        "EmployeeId": emp_id,
-        "EmployeeName": emp_name,
-        "EmployeeCode": emp_code,
-
-        "ShiftId": shift_id,
-        "ShiftDescription": shift_description,
-
-        "TimeSlipType": "1",
-        "TimeSlipDuration": duration,
-        "TimeSlipStartTime": _to_minutes(from_time),
-        "TimeSlipEndTime": _to_minutes(to_time),
-        "TimeSlipFromTime": from_time,
-        "TimeSlipToTime": to_time,
-
-        "DepartmentName": login.get("DepartmentName", ""),
-        "DesignationName": login.get("DesignationName", ""),
-
-        "TimeSlipFromTimeMailTemplate": from_time,
-        "TimeSlipToTimeMailTemplate": to_time,
-        "TimeSlipToDurationMailTemplate": f"{duration // 60:02}:{duration % 60:02}",
-
-        "ApprovedById": -1,
-
-        "TimeSlipReason": reason_name,
-        "PermissionReasonId": reason_id,
-
-        "FromTimeForPrint": from_time,
-        "ToTimeForPrint": to_time,
-
-        "TimeSlipStatus": 1,
-        "TimeSlipPermissionHoursMailTemplate": "0:00",
-        "TimeSlipVersion": 1,
-
-        "GuId": str(uuid.uuid4())
-    }
-
-    # ---------------- SERVICE CALL ----------------
-    url = direct_url("/prs/TimeSlip/SaveTimeSlip", login)
-
-    # Derive Origin and Referer from GB_API_BASE
-    parsed_base = urlparse(settings.GB_API_BASE)
-    base_url = f"{parsed_base.scheme}://{parsed_base.netloc}"
-
-    headers = {
-        "Login": json.dumps(login),
-        "Content-Type": "application/json",
-        "X-Requested-With": "XMLHttpRequest",
-        "Referer": f"{base_url}/apps/main.html",
-        "Origin": base_url,
-        "User-Agent": "Mozilla/5.0"
-    }
-
-    if settings.DEBUG:
-        print("\n===== TIME SLIP PAYLOAD =====")
-        print(json.dumps(payload, indent=2))
-        print("POST →", url)
-
-    # ---------------- EXECUTE ----------------
-    # ---------------- EXECUTE ----------------
-    # Use session (requests) for consistent authentication
-    try:
-        response = session.post(url, json=payload, headers=headers, timeout=60)
-        
-        # 📝 DEBUG: Log full response details
-        logger.info(f"📥 Save Time Slip Response Status: {response.status_code}")
-        try:
-            # Often GB returns empty body on success (204) or sometimes JSON
-            if response.status_code != 204:
-                response_json = response.json()
-                logger.info(f"📥 Save Time Slip Response Body: {json.dumps(response_json, indent=2)}")
-                
-                # Check for nested errors often found in GB API
-                if isinstance(response_json, dict):
-                     if "status" in response_json and response_json["status"].get("http_code") != 200:
-                         logger.error(f"❌ API Logical Error: {response_json}")
-                     if "contents" in response_json:
-                         logger.info(f"📥 Response Contents: {response_json['contents']}")
-            else:
-                logger.info("📥 Response Body: (No Content - 204)")
-
-        except Exception as e:
-            logger.warning(f"⚠️ Could not parse response JSON body: {response.text}")
-
-        # Raise if NOT 2xx
-        response.raise_for_status()
-
-        # ✅ SUCCESS — try to extract TimeSlipNumber from response
-        ts_number = None
-        try:
-            if response.status_code != 204:
-                result = parse_api_response(response_json)
-                if isinstance(result, list) and result:
-                    ts_number = result[0].get("TimeSlipNumber")
-                elif isinstance(result, dict):
-                    ts_number = result.get("TimeSlipNumber")
-        except Exception:
-            pass
-
-        return {
-            "permission_number": ts_number,
-            "body": response_json if response.status_code != 204 else None,
-            "status_code": response.status_code
-        }
-
-    except Exception as e:
-        logger.error(f"❌ Failed to save time slip: {e}")
-        raise
-
-
-# ============================================================
-# GET TIME SLIP (PERMISSION) BALANCE
 # ============================================================
 
 def _period_epoch_timestamps() -> tuple:

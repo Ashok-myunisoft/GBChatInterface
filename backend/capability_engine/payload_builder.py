@@ -65,7 +65,9 @@ def _column(row: dict, *candidates: str, default=None):
 
 def build_payload(mappings: list[dict], *, login: dict, fields: dict,
                   resolvers: dict[str, Callable], computations: dict[str, Callable],
-                  department_details: dict | None = None) -> dict:
+                  department_details: dict | None = None,
+                  managed_values: dict | None = None,
+                  api_responses: dict | None = None) -> dict:
     payload: dict = {}
     for row in mappings:
         target = _column(row, "targetpath", "payloadpath", "targetfield", "fieldpath")
@@ -79,6 +81,9 @@ def build_payload(mappings: list[dict], *, login: dict, fields: dict,
         elif source_type == "FIELD":
             source = _column(row, "sourcefield", "sourcepath", "sourcevalue", "source")
             value = _read_path(fields, str(source or ""))
+        elif source_type == "API_RESPONSE":
+            source = _column(row, "sourcefield", "sourcepath", "sourcevalue", "source")
+            value = _read_path(api_responses or {}, str(source or ""))
         elif source_type == "CONSTANT":
             source = _column(row, "sourcevalue", "sourcefield", "source")
             # PostgreSQL JSON/JSONB drivers return the original Python JSON type.
@@ -106,5 +111,7 @@ def build_payload(mappings: list[dict], *, login: dict, fields: dict,
         _assign(payload, str(target), value)
     if department_details:
         payload.update(department_details)
+    if managed_values:
+        payload.update(managed_values)
     return payload
 

@@ -9,6 +9,8 @@ class Settings(BaseSettings):
     # ------------ OPENAI ------------
     OPENAI_MODEL: ClassVar[str] = "gpt-4o-mini"
     OPENAI_API_KEY: str
+    CAPABILITY_DATABASE_URL: str | None = None
+    CAPABILITY_ENGINE_TEST_MODE: bool = False
 
     # ------------ URL CONFIGURATION ------------
     DEFAULT_BASE_URI: str = "newserver:81"
